@@ -4,7 +4,7 @@ import numpy
 from numpy import array, dot
 from numpy.random import standard_normal
 import matplotlib.pyplot as plt
-
+import Theano.tensor as TT
 # Dataset
 # Model
 # Environment
@@ -56,7 +56,78 @@ class RLDataset(object):
         return self.R
 
 
+class ROML(object):
+    
+    def __init__(
+                self,
+                d, # dim of state rep (initial features)
+                k, # dim after linear transorm
+                Phi = None, # feature transform matrix f(x) = Phi x; [dxk]
+                T = None, # transition matrix; Tz_t = z_t+1
+                q = None, # reward function weights; r(x) = q' Phi x 
+                w = None, # value function weights; v(x) = w' Phi x
+                Sz = None, # transition noise
+                sr = None, # reward noise
+                ):
+        
+        defaults = {'Phi': 1e-2*numpy.random.standard_normal((d,k)),
+                    'T' : numpy.identity(k),
+                    'q' : numpy.random.standard_normal(k),
+                    'w' : numpy.random.standard_normal(k),
+                    'Sz' : numpy.identity(k),
+                    'er' : 1.}
+            
+        self.Phi = 1e-2*numpy.random.standard_normal((d,k)) if Phi is None else Phi
+        self.T = numpy.identity(k) if T is None else T
+        self.q = numpy.random.standard_normal(k) if q is None else q
+        self.w = numpy.random.standard_normal(k) if w is None else w
+        self.Sz = numpy.identity(k) if Sz is None else Sz
+        self.sr = 1. if sr  is None else sr
 
+        self.Phi_t = TT.tensor('Phi')
+        self.T_t = TT.tensor('T')
+        self.q_t = TT.tensor('q')
+        self.w_t = TT.tensor('w')
+        self.Sz_t = TT.tensor('Sz')
+        self.sr_t = TT.tensor('sr')
+        self.X_t = TT.tensor('X')
+        self.R_t = TT.tensor('R')
+        
+        self.Z_t = TT.dot(self.X_t, self.Phi_t)
+        rerr = TT.sum(TT.sqr(self.R_t - TT.dot(self.Z_t, self.q_t)))
+
+
+    def value(self, z):
+        return numpy.dot(z, self.w)
+
+    def reward(self, z):
+        return numpy.dot(z, self.q)
+    
+    def transition(self, z): 
+        return numpy.dot(z, self.T)
+
+    def encode(self, x):
+        return numpy.dot(x, self.Phi)
+
+    def loss(self, X, R):
+        
+        ''' takes array of features X and rewards R and returns the loss given
+        the current set of parameters. Examples through time are indexed by row'''
+        Z = self.encode(X)
+        rerr = numpy.sum((R - self.reward(Z))**2/self.sr)
+        zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
+        zerr_vp = numpy.dot(zerr_v, self.Sz) #n-1 by k
+        zerr = numpy.sum(zerr_vp.multiply(zerr_v))
+
+        return rerr + zerr
+
+    def loss_t(self):
+        
+        pass
+
+        
+    def train(self, dataset):
+        pass
 
 
 
