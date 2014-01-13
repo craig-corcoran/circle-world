@@ -34,6 +34,13 @@ class CircleWorld(object):
 
         return states, rewards
 
+# wtf gradient descent?
+# examine sampled dataset distribution
+# use shift?
+# closed-form coordinate descent?
+# regularization
+# other optimizers, scipy.optimize
+# natural gradient
 
 class ROML(object):
     
@@ -45,16 +52,20 @@ class ROML(object):
                 q = None, # reward function weights; r(x) = q' Phi x 
                 w = None, # value function weights; v(x) = w' Phi x
                 Mz = None, # transition noise, kxl where l <= k
-                sr = None # reward noise
+                sr = None, # reward noise
+                shift = 1e-12,
                 ):
             
-        self.Phi = 1e-2*numpy.random.standard_normal((d,k)) if Phi is None else Phi
+        self.Phi = 1e-5*numpy.random.standard_normal((d,k)) if Phi is None else Phi
+        #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
         self.T = numpy.identity(k) if T is None else T
         self.q = numpy.random.standard_normal(k) if q is None else q
+        #self.q = numpy.zeros(k) if q is None else q
         self.w = numpy.random.standard_normal(k) if w is None else w
         self.Mz = numpy.identity(k) if Mz is None else Mz
         self.Lz = numpy.dot(self.Mz,self.Mz.T)
         self.sr = 1. if sr  is None else sr
+        self.inv_shift = shift*numpy.identity(k)
 
         self.Phi_t = TT.dmatrix('Phi')
         self.T_t = TT.dmatrix('T')
@@ -64,12 +75,14 @@ class ROML(object):
         self.sr_t = TT.dscalar('sr')
         self.X_t = TT.dmatrix('X')
         self.R_t = TT.dvector('R')        
+
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
-    
+        self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
+        
         loss_t = self._loss_t()
         self.theano_loss = theano.function(self.theano_vars, loss_t, on_unused_input='ignore')
         
-        grad = theano.grad(loss_t, self.theano_params)
+        grad = theano.grad(TT.sum(loss_t), self.theano_params)
         self.theano_grad = theano.function(self.theano_vars, grad)
 
 
@@ -81,6 +94,10 @@ class ROML(object):
     @property
     def theano_params(self):
         return [self.Phi_t, self.T_t, self.q_t, self.Mz_t, self.sr_t]
+
+    @property
+    def params(self):
+        return [self.Phi, self.T, self.q, self.Mz, self.sr]
 
 
     def value(self, z):
@@ -112,27 +129,28 @@ class ROML(object):
         Z = self.encode(X)
         rerr = numpy.sum((R - self.reward(Z))**2)/self.sr**2
         zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
-        zerr_vp = numpy.dot(zerr_v, self.Lz) #n-1 by k
-        zerr = numpy.sum(numpy.multiply(zerr_vp,zerr_v))
+        zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Lz)) #n-1 by k
+        zerr = numpy.sum(numpy.multiply(zerr_vp, zerr_v))
         n = Z.shape[0]
-        norm = (n-1)*numpy.log(numpy.linalg.det(numpy.linalg.inv(self.Lz))) \
-               + 2*n*numpy.log(self.sr)
+        norm = ((n-1)*numpy.log(numpy.linalg.det(self.Lz)) \
+               + 2*n*numpy.log(self.sr))
 
-        return rerr + zerr + norm
+        return zerr, rerr, norm
 
     def _loss_t(self):
         ''' Generates the theano loss variable '''
         #return self.R_t - TT.dot(self.Z_t, self.q_t)
         rerr = TT.sum(TT.sqr(self.R_t - self._reward_t(self.Z_t)))/self.sr_t**2
         zerr_v = self.Z_t[1:] - self._transition_t(self.Z_t[:-1])
-        zerr_vp = TT.dot(zerr_v, self.Lz_t)
+        zerr_vp = TT.dot(zerr_v, LA.matrix_inverse(self.Lz_t))
         zerr = TT.sum(TT.mul(zerr_v, zerr_vp))
         
         n = TT.sum(TT.ones_like(self.R_t))
-        norm = (n-1)*TT.log(LA.det(LA.matrix_inverse(self.Lz_t))) \
-               + 2*n*TT.log(self.sr_t)
+        norm = ((n-1)*TT.log(LA.det(self.Lz_t)) \
+               + 2*n*TT.log(self.sr_t))
 
-        return TT.sum(zerr + rerr + norm)
+        #return TT.sum(zerr + rerr + norm)
+        return zerr, rerr, norm        
 
     def _loss(self, X, R):
         ''' slightly slower theano version of loss function '''
@@ -145,19 +163,31 @@ class ROML(object):
 
         return self.theano_grad(X, R, self.Phi, self.T, self.q, self.Mz, self.sr)
 
+    def grad_step(self, X, R, rate):
+        
+        grad = self.grad(X,R)
+        self.update_params(rate, grad)
 
-    def train(self, dataset):
-        pass
+    def update_params(self, rate, grad):
 
+        for i,p in enumerate(self.params):
+            p -= rate*grad[i]
+        
+        self.Lz = numpy.dot(self.Mz,self.Mz.T)
+        self.last_delta = (rate, grad)
 
+    def revert_last_delta(self):
+        
+        self.update_params(-self.last_delta[0], self.last_delta[1])
+        
 
 class FourierFeatureMap(object):
     
-    def __init__(self, N, sin = False):
+    def __init__(self, N, use_sin = False):
         # Implicit dividing freqs by two here bc range is -1, 1
         freqs = numpy.pi * numpy.arange(N,dtype=float) 
         self.W = numpy.array(list(it.product(freqs, freqs))).T
-        self.sin = sin
+        self.sin = use_sin
 
     def transform(self,P):
         
@@ -167,12 +197,33 @@ class FourierFeatureMap(object):
             return numpy.cos(numpy.dot(P,self.W))  # real component
 
 
+def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
+    
+    plt.clf()
+    n_sp1 = numpy.sqrt(n_plot) if n_plot > 2 else n_plot
+    n_sp2 = n_sp1 if n_plot > 2 else 1
+    side = numpy.sqrt(X.shape[0])
+    gs = gridspec.GridSpec(int(n_sp1), int(n_sp2))
+    gs.update(wspace=0., hspace=0.)
+
+    for i in xrange(n_plot):
+        
+        ax = plt.subplot(gs[i])
+        ax.xaxis.set_visible(False)
+        ax.yaxis.set_visible(False)
+        im = X[:,-i] if last else X[:,i]
+        plt.imshow(numpy.reshape(im, (side,side)), cmap = 'gray')
+        
+    plt.tight_layout()
+    plt.savefig(file_name)
+
+
 def view_fourier_basis(N = 10, n_plot = 64, 
-                       shuffle = False, last = False, sin = False):
+                       shuffle = False, last = False, use_sin = False):
 
     # plot a regular grid
     P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-    fmap = FourierFeatureMap(N, sin)
+    fmap = FourierFeatureMap(N, use_sin)
     X = fmap.transform(P) 
 
     print X[:,0] 
@@ -182,27 +233,6 @@ def view_fourier_basis(N = 10, n_plot = 64,
         numpy.random.shuffle(numpy.transpose(X))
 
     plot_filters(X, n_plot, 'fourier_basis.png', last)
-    
-    
-def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
-    
-    plt.clf()
-    n_sp = numpy.sqrt(n_plot)
-    side = numpy.sqrt(X.shape[0])
-    gs = gridspec.GridSpec(int(n_sp), int(n_sp))
-    gs.update(wspace=0., hspace=0.)
-
-    for i in xrange(n_plot):
-        
-        #ax = plt.subplot(n_sp,n_sp,i+1)
-        ax = plt.subplot(gs[i])
-        ax.xaxis.set_visible(False)
-        ax.yaxis.set_visible(False)
-        im = X[:,-i] if last else X[:,i]
-        plt.imshow(numpy.reshape(im, (side,side)), cmap = 'gray')
-        
-    plt.tight_layout()
-    plt.savefig(file_name)
     
     
 def test_circleWorld(n=100, N = 100):
@@ -244,7 +274,7 @@ def test_ROML(n=10, N = 10):
     shapes = map(numpy.shape, model.grad(X,R))
     assert shapes == [(N**2,2), (2,2), (2,), (2,2), ()]
 
-def main(n=10, N = 10, k = 2):
+def main(n=1000, N = 10, k = 2):
     
     cworld = CircleWorld()
     P, R = cworld.get_samples(n)
@@ -255,9 +285,76 @@ def main(n=10, N = 10, k = 2):
     
     model = ROML(N**2, k)
 
-    print model.loss(X,R)
-    print model._loss(X,R)
-    print map(numpy.shape, model.grad(X,R))
+    print 'gradient dimensions: ', map(numpy.shape, model.grad(X,R))
+
+    loss = numpy.sum(model.loss(X,R))
+    losses = model.loss(X,R)
+    _losses = model._loss(X,R)
+
+    i = 0
+
+    def log():
+        print 'theano losses: ', model.loss(X,R) # _losses[0], _losses[1], _losses[2]
+        print 'numpy  losses: ', model._loss(X,R) # losses[0], losses[1], losses[2]
+        print 'loss sum: ', numpy.sum(model.loss(X,R))
+        print model.Mz
+        print model.Lz
+        print 'iteration: ', i
+
+    def plot_learned():
+        # plot a regular grid
+        P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
+        fmap = FourierFeatureMap(N)
+        X = fmap.transform(P) 
+        Z = model.encode(X)
+        plot_filters(Z, 2, 'learned_basis.png')
+
+    log()
+
+    delta = -1
+    step = 1e-5
+    wait = 5
+    count = 0
+    while count < wait:
+        
+        if (delta > -1e-8) & (delta < 0):
+            print 'count'
+            count += 1
+        
+        model.grad_step(X,R,step)
+        losses = model.loss(X,R)
+        _losses = model._loss(X,R)
+
+        new_loss = numpy.sum(losses)
+        delta = new_loss - loss
+        
+
+        if delta > 0:
+            #print 'reverting last step'
+            model.revert_last_delta()
+            if abs(loss - numpy.sum(model.loss(X,R))) > 1e-8:
+                print 'revert different'
+                loss = numpy.sum(model.loss(X,R))
+
+        else:
+            loss = new_loss
+        
+        i += 1
+        if (i % 50) == 0:
+            print 'slowing'
+            log()
+            step = step/2.
+            plot_learned()
+
+        for j in xrange(len(losses)):
+            #print abs(_losses[j] - losses[j])
+            try:
+                assert abs(_losses[j] - losses[j]) < 1e-8
+            except AssertionError as e:
+                print e
+                print 'losses different'
+                abs(_losses[j] - losses[j])
+
 
 if __name__ == '__main__':
     #test_circleWorld()
