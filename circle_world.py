@@ -54,8 +54,9 @@ class ROML(object):
                 Mz = None, # transition noise, kxl where l <= k
                 sr = None, # reward noise
                 shift = 1e-12,
+                l2 = 1e-4, # l2 regularization level
                 ):
-        self.Phi = 1e-5*numpy.random.standard_normal((d,k)) if Phi is None else Phi
+        self.Phi = 0.1*numpy.random.standard_normal((d,k)) if Phi is None else Phi
         #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
         self.T = numpy.identity(k) if T is None else T
         self.q = numpy.random.standard_normal(k) if q is None else q
@@ -81,7 +82,8 @@ class ROML(object):
         loss_t = self._loss_t()
         self.theano_loss = theano.function(self.theano_vars, loss_t, on_unused_input='ignore')
 
-        grad = theano.grad(TT.sum(loss_t), self.theano_params)
+        grad = theano.grad(TT.sum(loss_t) + l2 * sum(
+            TT.sum(p ** 2) for p in self.theano_params), self.theano_params)
         self.theano_grad = theano.function(self.theano_vars, grad)
 
     @property
@@ -159,27 +161,24 @@ class ROML(object):
         return self.theano_grad(X, R, self.Phi, self.T, self.q, self.Mz, self.sr)
 
     def grad_step(self, X, R, rate):
-
         grad = self.grad(X,R)
         self.update_params(rate, grad)
 
-    def update_params(self, rate, grad, lambda_ = 1e-3):
-
+    def update_params(self, rate, grad):
         for i, p in enumerate(self.params):
-            p -= rate * (grad[i] + lambda_ * p)
+            p -= rate * grad[i]
 
         self.Sz = numpy.dot(self.Mz,self.Mz.T)
         self.last_delta = (rate, grad)
 
     def revert_last_delta(self):
-
         self.update_params(-self.last_delta[0], self.last_delta[1])
 
 
 class FourierFeatureMap(object):
     def __init__(self, N, use_sin = False):
         # Implicit dividing freqs by two here bc range is -1, 1
-        freqs = numpy.pi * numpy.arange(N,dtype=float)
+        freqs = numpy.pi * numpy.arange(N // 2 + 1,dtype=float)
         self.W = numpy.array(list(it.product(freqs, freqs))).T
         self.sin = use_sin
 
@@ -295,12 +294,12 @@ def main(n=1000, N = 20, k = 4):
         fmap = FourierFeatureMap(N)
         X = fmap.transform(P)
         Z = model.encode(X)
-        plot_filters(Z, k, 'learned_basis.png')
+        plot_filters(Z, k, 'learned_basis_%05d.png' % i)
 
     log()
 
     delta = -1
-    step = 1e-5
+    step = 1e-3
     wait = 5
     count = 0
     while count < wait:
@@ -317,7 +316,7 @@ def main(n=1000, N = 20, k = 4):
         delta = new_loss - loss
 
         if delta > 0:
-            #print 'reverting last step'
+            print 'reverting last step'
             model.revert_last_delta()
             if abs(loss - numpy.sum(model.loss(X,R))) > 1e-8:
                 print 'revert different'
@@ -329,7 +328,7 @@ def main(n=1000, N = 20, k = 4):
         if (i % 50) == 0:
             print 'slowing'
             log()
-            step = step/2.
+            step = 0.9 * step
             plot_learned()
 
         for j in xrange(len(losses)):
