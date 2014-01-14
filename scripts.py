@@ -1,11 +1,20 @@
-import time
-import matplotlib.gridspec as gridspec
-import numpy
-from numpy.random import standard_normal
-import matplotlib.pyplot as plt
-import theano.tensor as TT
-import theano
+#import time
+
+#import itertools as it
+#import numpy
+#from numpy import array, dot
+#from numpy.random import standard_normal
+#import matplotlib.pyplot as plt
+#import theano.tensor as TT
+#import theano.sandbox.linalg.ops as LA
+#import theano
+import numpy 
 import rsis
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from features import FourierFeatureMap
+from domains import CircleWorld
+from model import RSIS
 
 logger = rsis.get_logger(__name__)
 
@@ -53,8 +62,6 @@ def view_fourier_basis(N = 10, n_plot = 64,
     plot_filters(X, n_plot, 'fourier_basis.png', last)
 
 
-
-
 def main(n=1000, N = 20, k = 4):
     cworld = CircleWorld()
     P, R = cworld.get_samples(n)
@@ -62,9 +69,9 @@ def main(n=1000, N = 20, k = 4):
     fmap = FourierFeatureMap(N)
 
     X = fmap.transform(P)
-    assert X.shape == (n, N**2)
+    assert X.shape == (n, (N//2+1)**2)
 
-    model = ROML(N**2, k)
+    model = RSIS(N**2, k)
 
     print 'gradient dimensions: ', map(numpy.shape, model.grad(X,R))
 
@@ -191,9 +198,10 @@ def main(n=1000, N = 20, k = 4):
 
 
 if __name__ == '__main__':
-    view_fourier_basis(N = 15, n_plot = 64, 
-                       shuffle = False, last = False, use_sin = False)
+    #view_fourier_basis(N = 15, n_plot = 64, 
+    #                   shuffle = False, last = False, use_sin = False)
     #test_circleWorld()
     #test_ROML()
-    #main()
+    main()
+
 
