@@ -59,7 +59,7 @@ def view_fourier_basis(N = 10, n_plot = 64,
     if shuffle: # shuffle the columns of X
         numpy.random.shuffle(numpy.transpose(X))
 
-    plot_filters(X, n_plot, 'fourier_basis.png', last)
+    plot_filters(X, n_plot, 'rsis/plots/fourier_basis.png', last)
 
 
 def main(n=1000, N = 20, k = 4):
@@ -71,7 +71,7 @@ def main(n=1000, N = 20, k = 4):
     X = fmap.transform(P)
     assert X.shape == (n, (N//2+1)**2)
 
-    model = RSIS(N**2, k)
+    model = RSIS((N//2+1)**2, k)
 
     print 'gradient dimensions: ', map(numpy.shape, model.grad(X,R))
 
@@ -95,63 +95,63 @@ def main(n=1000, N = 20, k = 4):
         fmap = FourierFeatureMap(N)
         X = fmap.transform(P)
         Z = model.encode(X)
-        plot_filters(Z, k, 'learned_basis_%05d.png' % i)
+        plot_filters(Z, k, 'rsis/plots/learned_basis_%05d.png' % i)
 
     log()
-    it = 0
-    waiting = 0
-    best_params = None
-    best_test_loss = None
-    try:
-        while (waiting < patience):
-            it += 1
-            logger.info('*** iteration ' + str(it) + '***')
+    #it = 0
+    #waiting = 0
+    #best_params = None
+    #best_test_loss = None
+    #try:
+        #while (waiting < patience):
+            #it += 1
+            #logger.info('*** iteration ' + str(it) + '***')
             
-            old_params = copy.deepcopy(basis.flat_params)
-            for loss_, wrt_ in ((loss, wrt), ('bellman', ['w'])):
-                basis.set_loss(loss_, wrt_)
-                basis.set_params(scipy.optimize.fmin_cg(
-                        basis.loss, basis.flat_params, basis.grad,
-                        args = (S, R, Mphi, Mrew),
-                        full_output = False,
-                        maxiter = max_iter,
-                        ))
-            basis.set_loss(loss, wrt) # reset loss back from bellman
+            #old_params = copy.deepcopy(basis.flat_params)
+            #for loss_, wrt_ in ((loss, wrt), ('bellman', ['w'])):
+                #basis.set_loss(loss_, wrt_)
+                #basis.set_params(scipy.optimize.fmin_cg(
+                        #basis.loss, basis.flat_params, basis.grad,
+                        #args = (S, R, Mphi, Mrew),
+                        #full_output = False,
+                        #maxiter = max_iter,
+                        #))
+            #basis.set_loss(loss, wrt) # reset loss back from bellman
              
-            delta = numpy.linalg.norm(old_params-basis.flat_params)
-            logger.info('delta theta: %.2f' % delta)
+            #delta = numpy.linalg.norm(old_params-basis.flat_params)
+            #logger.info('delta theta: %.2f' % delta)
             
-            norms = numpy.apply_along_axis(numpy.linalg.norm, 0, basis.thetas[0])
-            logger.info( 'column norms: %.2f min / %.2f avg / %.2f max' % (
-                norms.min(), norms.mean(), norms.max()))
+            #norms = numpy.apply_along_axis(numpy.linalg.norm, 0, basis.thetas[0])
+            #logger.info( 'column norms: %.2f min / %.2f avg / %.2f max' % (
+                #norms.min(), norms.mean(), norms.max()))
             
-            err = basis.loss(basis.flat_params, S_val, R_val, Mphi, Mrew)
+            #err = basis.loss(basis.flat_params, S_val, R_val, Mphi, Mrew)
             
-            if err < best_test_loss:
+            #if err < best_test_loss:
                 
-                if ((best_test_loss - err) / best_test_loss > min_imp) and (delta > min_delta):
-                    waiting = 0
-                else:
-                    waiting += 1
-                    logger.info('iters without better %s loss: %i' % (basis.loss_type, int(waiting)))
+                #if ((best_test_loss - err) / best_test_loss > min_imp) and (delta > min_delta):
+                    #waiting = 0
+                #else:
+                    #waiting += 1
+                    #logger.info('iters without better %s loss: %i' % (basis.loss_type, int(waiting)))
 
-                best_test_loss = err
-                best_params = copy.deepcopy(basis.flat_params)
-                logger.info('new best %s loss: %.2f' % (basis.loss_type, best_test_loss))
+                #best_test_loss = err
+                #best_params = copy.deepcopy(basis.flat_params)
+                #logger.info('new best %s loss: %.2f' % (basis.loss_type, best_test_loss))
                 
-            else:
-                waiting += 1
-                logger.info('iters without better %s loss: %i' % (basis.loss_type, int(waiting)))
+            #else:
+                #waiting += 1
+                #logger.info('iters without better %s loss: %i' % (basis.loss_type, int(waiting)))
 
-            Bs = basis.encode(encoder.B, False)
-            d_loss_learning = record_loss(d_loss_learning)
+            #Bs = basis.encode(encoder.B, False)
+            #d_loss_learning = record_loss(d_loss_learning)
 
-    except KeyboardInterrupt:
-        logger.info( '\n user stopped current training loop')
+    #except KeyboardInterrupt:
+        #logger.info( '\n user stopped current training loop')
     
-    # set params to best params from last loss
-    basis.set_params(vec = best_params)
-    switch.append(it-1)
+    ## set params to best params from last loss
+    #basis.set_params(vec = best_params)
+    #switch.append(it-1)
 
 
     delta = -1
