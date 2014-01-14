@@ -261,16 +261,16 @@ def test_ROML(n=10, N = 10):
     assert shapes == [(N**2,2), (2,2), (2,), (2,2), ()]
 
 
-def main(n=1000, N = 20, k = 4):
+def main(n=1000, N = 15, k = 4):
     cworld = CircleWorld()
     P, R = cworld.get_samples(n)
 
     fmap = FourierFeatureMap(N)
 
     X = fmap.transform(P)
-    assert X.shape == (n, N**2)
+    assert X.shape == (n, (N//2+1)**2)
 
-    model = ROML(N**2, k)
+    model = ROML((N//2+1)**2, k)
 
     print 'gradient dimensions: ', map(numpy.shape, model.grad(X,R))
 
