@@ -1,17 +1,10 @@
-#import time
-
-#import itertools as it
-#import numpy
-#from numpy import array, dot
-#from numpy.random import standard_normal
-#import matplotlib.pyplot as plt
-#import theano.tensor as TT
-#import theano.sandbox.linalg.ops as LA
-#import theano
+import copy
 import numpy 
-import rsis
+import scipy.optimize
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+
+import rsis
 from features import FourierFeatureMap
 from domains import CircleWorld
 from model import RSIS
@@ -20,14 +13,17 @@ logger = rsis.get_logger(__name__)
 
 
 # scipy optimizer
-# wtf gradient descent?
-# truncate fourier space
 # l1 and l2 regularization / grid search
 # closed-form coordinate descent?
 # natural gradient
+# use shift to avoid singular matrix inversion?
 
-# use shift?
-# regularization
+# LSTD and TD0 baselines
+# solving for true value function
+# performance measure
+
+# test sum of inner products
+# check for sign changes and set to zero
 
 def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
     plt.clf()
@@ -43,7 +39,12 @@ def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
         ax.xaxis.set_visible(False)
         ax.yaxis.set_visible(False)
         im = X[:,-(i+1)] if last else X[:,i]
-        plt.imshow(numpy.reshape(im, (side,side)), cmap = 'gray', vmin = -lim, vmax = lim)
+        plt.imshow(
+                  numpy.reshape(im, (side,side)), 
+                  cmap = 'gray', 
+                  vmin = -lim, 
+                  vmax = lim,
+                  interpolation = 'nearest')
 
     plt.tight_layout()
     plt.savefig(file_name)
@@ -62,139 +63,99 @@ def view_fourier_basis(N = 10, n_plot = 64,
     plot_filters(X, n_plot, 'rsis/plots/fourier_basis.png', last)
 
 
-def main(n=1000, N = 20, k = 4):
+def main(
+        n=1000, # number of samples
+        N = 20, # grid/basis resolution, num of fourier funcs: d = N/2+1, grid is [2Nx2N]
+        k = 4,  # number of compressed features, Phi is [dxk]
+        max_iter = 3, # max number of cg optimizer steps per iteration
+        min_imp = 1e-3, # min loss improvement
+        min_delta = 1e-5, # min parameter change
+        patience=10 # number of bad steps before stopping
+        ):
+    
     cworld = CircleWorld()
-    P, R = cworld.get_samples(n)
-
+    model = RSIS((N//2+1)**2, k)
     fmap = FourierFeatureMap(N)
 
-    X = fmap.transform(P)
-    assert X.shape == (n, (N//2+1)**2)
+    it = 0
+    waiting = 0
+    best_params = None
+    best_loss = 1.e20
 
-    model = RSIS((N//2+1)**2, k)
+    def sample_circle_world(n):
+        P, R = cworld.get_samples(n)
 
-    print 'gradient dimensions: ', map(numpy.shape, model.grad(X,R))
+        X = fmap.transform(P)
+        assert X.shape == (n, (N//2+1)**2)
+        
+        return X, R
 
-    loss = numpy.sum(model.loss(X,R))
-    losses = model.loss(X,R)
-    _losses = model._loss(X,R)
-
-    i = 0
-
-    def log():
-        print 'theano losses: ', model.loss(X,R)
-        print 'numpy  losses: ', model._loss(X,R)
-        print 'loss sum: ', numpy.sum(model.loss(X,R))
-        print model.Mz
-        print model.Sz
-        print 'iteration: ', i
-
-    def plot_learned():
+    def plot_learned(N):
         # plot a regular grid
+        logger.info('plotting current features')
         P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-        fmap = FourierFeatureMap(N)
         X = fmap.transform(P)
         Z = model.encode(X)
-        plot_filters(Z, k, 'rsis/plots/learned_basis_%05d.png' % i)
+        plot_filters(Z, k, 'rsis/plots/learned_basis_%05d.png' % it)
 
-    log()
-    #it = 0
-    #waiting = 0
-    #best_params = None
-    #best_test_loss = None
-    #try:
-        #while (waiting < patience):
-            #it += 1
-            #logger.info('*** iteration ' + str(it) + '***')
+    X_test, R_test = sample_circle_world(2*n)
+     
+    try:
+        while (waiting < patience):
             
-            #old_params = copy.deepcopy(basis.flat_params)
-            #for loss_, wrt_ in ((loss, wrt), ('bellman', ['w'])):
-                #basis.set_loss(loss_, wrt_)
-                #basis.set_params(scipy.optimize.fmin_cg(
-                        #basis.loss, basis.flat_params, basis.grad,
-                        #args = (S, R, Mphi, Mrew),
-                        #full_output = False,
-                        #maxiter = max_iter,
-                        #))
-            #basis.set_loss(loss, wrt) # reset loss back from bellman
-             
-            #delta = numpy.linalg.norm(old_params-basis.flat_params)
-            #logger.info('delta theta: %.2f' % delta)
+            it += 1
             
-            #norms = numpy.apply_along_axis(numpy.linalg.norm, 0, basis.thetas[0])
+            logger.info('*** iteration ' + str(it) + '***')
+            
+            old_params = model.flat_params
+
+            # collect new sample from the domain
+            X, R = sample_circle_world(n)
+
+            model.set_params(
+                scipy.optimize.fmin_cg(
+                            model.optimize_loss, model.flat_params, model.optimize_grad,
+                            args = (X, R),
+                            full_output = False,
+                            maxiter = max_iter)
+                            )
+
+            delta = numpy.sum((old_params-model.flat_params)**2)
+
+            logger.info('delta theta: %.5f' % delta)
+            
+            norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
+            logger.info('Phi column norms: ' + str(norms))
             #logger.info( 'column norms: %.2f min / %.2f avg / %.2f max' % (
                 #norms.min(), norms.mean(), norms.max()))
             
-            #err = basis.loss(basis.flat_params, S_val, R_val, Mphi, Mrew)
+            #loss = model.loss(X,R)
+            loss = model.loss(X_test, R_test)
             
-            #if err < best_test_loss:
+            if loss < best_loss:
                 
-                #if ((best_test_loss - err) / best_test_loss > min_imp) and (delta > min_delta):
-                    #waiting = 0
-                #else:
-                    #waiting += 1
-                    #logger.info('iters without better %s loss: %i' % (basis.loss_type, int(waiting)))
+                if ((best_loss - loss) / abs(best_loss) > min_imp) or (delta > min_delta):
+                    waiting = 0
+                else:
+                    waiting += 1
+                    logger.info('iters without better loss: %i' % int(waiting))
 
-                #best_test_loss = err
-                #best_params = copy.deepcopy(basis.flat_params)
-                #logger.info('new best %s loss: %.2f' % (basis.loss_type, best_test_loss))
+                best_loss = loss
+                best_params = model.flat_params # copy.deepcopy
+                logger.info('new best loss: %.2f' %  best_loss)
                 
-            #else:
-                #waiting += 1
-                #logger.info('iters without better %s loss: %i' % (basis.loss_type, int(waiting)))
+            else:
+                waiting += 1
+                logger.info('iters without better loss: %i' % int(waiting))
 
-            #Bs = basis.encode(encoder.B, False)
-            #d_loss_learning = record_loss(d_loss_learning)
+            if (it % 50) == 0:
+                plot_learned(4*N)
 
-    #except KeyboardInterrupt:
-        #logger.info( '\n user stopped current training loop')
+    except KeyboardInterrupt:
+        logger.info( '\n user stopped current training loop')
     
-    ## set params to best params from last loss
-    #basis.set_params(vec = best_params)
-    #switch.append(it-1)
-
-
-    delta = -1
-    step = 1e-3
-    wait = 5
-    count = 0
-    while count < wait:
-
-        if (delta > -1e-8) & (delta < 0):
-            print 'count'
-            count += 1
-
-        model.grad_step(X,R,step)
-        losses = model.loss(X,R)
-        _losses = model._loss(X,R)
-
-        new_loss = numpy.sum(losses)
-        delta = new_loss - loss
-
-        if delta > 0:
-            print 'reverting last step'
-            model.revert_last_delta()
-            if abs(loss - numpy.sum(model.loss(X,R))) > 1e-8:
-                print 'revert different'
-                loss = numpy.sum(model.loss(X,R))
-        else:
-            loss = new_loss
-
-        i += 1
-        if (i % 50) == 0:
-            print 'slowing'
-            log()
-            step = 0.9 * step
-            plot_learned()
-
-        for j in xrange(len(losses)):
-            #print abs(_losses[j] - losses[j])
-            try:
-                assert abs(_losses[j] - losses[j]) < 1e-8
-            except AssertionError as e:
-                print e
-                print 'losses different'
-                abs(_losses[j] - losses[j])
+    # set params to best params from last loss
+    model.set_params(best_params)
 
 
 if __name__ == '__main__':
@@ -202,6 +163,6 @@ if __name__ == '__main__':
     #                   shuffle = False, last = False, use_sin = False)
     #test_circleWorld()
     #test_ROML()
-    main()
+    rsis.script(main)
 
 
