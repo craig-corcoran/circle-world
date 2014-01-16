@@ -1,4 +1,8 @@
 import numpy
+import itertools as it
+
+
+# tests may need to be updated
 
 def test_circleWorld(n=100, N = 100):
     cworld = CircleWorld()

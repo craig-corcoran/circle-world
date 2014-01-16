@@ -86,7 +86,7 @@ class RSIS(object):
             for i, name in enumerate(self.param_names): 
                 self.__setattr__(name, params[i])
 
-            #self.Sz = numpy.dot(self.Mz,self.Mz.T)
+            self.Sz = numpy.dot(self.Mz,self.Mz.T)
 
     def _unpack_params(self, vec):
         i = 0
@@ -138,7 +138,6 @@ class RSIS(object):
        
         ''' numpy version of loss function '''
 
-        self.Sz = numpy.dot(self.Mz,self.Mz.T)
         Z = self.encode(X)
         rerr = numpy.sum((R - self.reward(Z))**2)/self.sr**2
         zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
@@ -169,6 +168,20 @@ class RSIS(object):
         indexed by row '''
 
         return self.theano_loss(self.Phi, self.T, self.q, self.Mz, self.sr, X, R)
+
+    def unscaled_losses(self, X, R):
+        ''' returns a list of loss components, not scaled by the guassian
+        parameters'''
+
+        Z = self.encode(X)
+        rerr = numpy.sum((R - self.reward(Z))**2)
+        zerr =  numpy.sum(Z[1:] - self.transition(Z[:-1]))**2
+        n = Z.shape[0]
+        norm = (n-1)*numpy.log(numpy.linalg.det(numpy.dot(self.Mz,self.Mz.T))) + 2*n*numpy.log(self.sr)
+
+        reg = self.l1 * sum(numpy.sum(abs(p)) for p in self.params)
+        
+        return rerr/(n-1), zerr/(n-1), norm/(n-1), reg
 
     def grad(self, X, R):
         ''' returns gradient at the current parameters with the given inputs X

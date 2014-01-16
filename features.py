@@ -9,8 +9,10 @@ class FourierFeatureMap(object):
         self.use_sin = use_sin
 
     def transform(self,P):
-        feats = numpy.cos(numpy.dot(P,self.W))  # real component
+        prod = numpy.dot(P,self.W)
+        feats = numpy.cos(prod)  # real component
         if self.use_sin:
-            feats = numpy.concatenate([feats, numpy.sin(numpy.dot(P,self.W))])  # complex component
+            feats = numpy.append(feats, numpy.sin(prod), axis = 1)  # complex component
         return feats
+            
 

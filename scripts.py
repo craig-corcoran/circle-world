@@ -11,8 +11,10 @@ from model import RSIS
 
 logger = rsis.get_logger(__name__)
 
+# add non-scaled loss component output
+# viewing learned reward and value function (vs true)
+# plot train/test loss over time
 
-# scipy optimizer
 # l1 and l2 regularization / grid search
 # closed-form coordinate descent?
 # natural gradient
@@ -21,8 +23,6 @@ logger = rsis.get_logger(__name__)
 # LSTD and TD0 baselines
 # solving for true value function
 # performance measure
-
-# test sum of inner products
 # check for sign changes and set to zero
 
 def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
@@ -100,6 +100,20 @@ def main(
         Z = model.encode(X)
         plot_filters(Z, k, 'rsis/plots/learned_basis_%05d.png' % it)
 
+    def log():
+        logger.info('loss improvement: %.5f' % numpy.sum(best_loss-loss))
+        logger.info('delta theta: %.5f' % delta)
+
+        phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
+        M_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Mz)
+        logger.info('Phi column norms: ' + str(phi_norms))
+        logger.info('Mz column norms: ' + str(M_norms))
+        logger.info('loss components: ' + str(zip(['r', 'z', 'norm', 'reg'], 
+                                map(str,model.unscaled_losses(X_test,R_test)))))
+
+        if (it % 10) == 1:
+            plot_learned(4*N)
+
     X_test, R_test = sample_circle_world(2*n)
 
     view_position_scatterplot(cworld.get_samples(n)[0])
@@ -126,17 +140,10 @@ def main(
                                 maxiter = max_iter)
                                 )
 
-                delta = numpy.sum((old_params-model.flat_params)**2)
-
-                logger.info('delta theta: %.5f' % delta)
-                
-                norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
-                logger.info('Phi column norms: ' + str(norms))
-                #logger.info( 'column norms: %.2f min / %.2f avg / %.2f max' % (
-                    #norms.min(), norms.mean(), norms.max()))
-                
-                #loss = model.loss(X,R)
+                delta = numpy.sum((old_params-model.flat_params)**2)                
                 loss = model.loss(X_test, R_test)
+
+                log()
                 
                 if loss < best_loss:
                     
@@ -154,11 +161,9 @@ def main(
                     waiting += 1
                     logger.info('iters without better loss: %i' % int(waiting))
 
-                if (it % 10) == 0:
-                    plot_learned(4*N)
-
             except ValueError:
-                model.reset_nans()
+                
+                #model.reset_nans()
                 logger.info('resetting parameters because of nans')
 
     except KeyboardInterrupt:
