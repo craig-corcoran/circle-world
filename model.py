@@ -16,11 +16,12 @@ class RSIS(object):
                 sr = None, # reward noise
                 #shift = 1e-12,
                 l1 = 1e-3, # l1 regularization constant
+                init_scale = 1e-1,
                 ):
-        self.Phi = 0.1*numpy.random.standard_normal((d,k)) if Phi is None else Phi
+        self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
         #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
         self.T = numpy.identity(k) if T is None else T
-        self.q = numpy.random.standard_normal(k) if q is None else q
+        self.q = init_scale*numpy.random.standard_normal(k) if q is None else q
         #self.q = numpy.zeros(k) if q is None else q
         #self.w = numpy.random.standard_normal(k) if w is None else w
         self.Mz = numpy.identity(k) if Mz is None else Mz
@@ -28,6 +29,7 @@ class RSIS(object):
         self.sr = numpy.array(1.) if sr  is None else sr
         #self.inv_shift = shift*numpy.identity(k)
         self.l1 = l1
+        self.init_scale = init_scale
         self.param_names = ['Phi', 'T', 'q', 'Mz', 'sr']
 
         self.Phi_t = TT.dmatrix('Phi')
@@ -175,11 +177,26 @@ class RSIS(object):
         return self.theano_grad(self.Phi, self.T, self.q, self.Mz, self.sr, X, R)
 
     def optimize_loss(self, params, X, R):
-        Phi, T, q, Mz, sr = self._unpack_params(params)
-        return self.theano_loss(Phi, T, q, Mz, sr, X, R)
+        unpacked = self._unpack_params(params)
+        print zip(self.param_names, unpacked)
+        return self.theano_loss(*(unpacked + [X, R]))
 
     def optimize_grad(self, params, X, R):
         Phi, T, q, Mz, sr = self._unpack_params(params)
         grad = self.theano_grad(Phi, T, q, Mz, sr, X, R)
         return self._flatten(grad)
+
+    def reset_nans(self):
+        
+        for i, name in enumerate(self.param_names): 
+            p = self.__getattr__(name)
+            if numpy.isnan(p).any():
+                if name in ['Phi', 'q']:
+                    self.__setattr__(name, self.init_scale * numpy.random.standard_normal(numpy.shape(p)))
+                else:
+                    if p.shape == ():                    
+                        self.__setattr__(name, numpy.array(1.))
+                    else:
+                        self.__setattr__(name, numpy.identity(p.shape))
+
 
