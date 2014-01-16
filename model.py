@@ -18,6 +18,8 @@ class RSIS(object):
                 l1 = 1e-3, # l1 regularization constant
                 init_scale = 1e-1,
                 ):
+        self.k = k
+        self.d = d
         self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
         #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
         self.T = numpy.identity(k) if T is None else T
@@ -25,7 +27,7 @@ class RSIS(object):
         #self.q = numpy.zeros(k) if q is None else q
         #self.w = numpy.random.standard_normal(k) if w is None else w
         self.Mz = numpy.identity(k) if Mz is None else Mz
-        self.Sz = numpy.dot(self.Mz,self.Mz.T)
+        #self.Sz = numpy.dot(self.Mz,self.Mz.T)
         self.sr = numpy.array(1.) if sr  is None else sr
         self.inv_shift = shift*numpy.identity(k)
         self.l1 = l1
@@ -71,6 +73,10 @@ class RSIS(object):
     def shapes(self):
         return map(numpy.shape, self.params)
 
+    @property
+    def Sz(self):
+        return numpy.dot(self.Mz,self.Mz.T)
+
     @staticmethod
     def _flatten(params):
         z = numpy.array([])
@@ -86,7 +92,7 @@ class RSIS(object):
             for i, name in enumerate(self.param_names): 
                 self.__setattr__(name, params[i])
 
-            self.Sz = numpy.dot(self.Mz,self.Mz.T)
+            #self.Sz = numpy.dot(self.Mz,self.Mz.T)
 
     def _unpack_params(self, vec):
         i = 0
@@ -177,7 +183,7 @@ class RSIS(object):
         rerr = numpy.sum((R - self.reward(Z))**2)
         zerr =  numpy.sum(Z[1:] - self.transition(Z[:-1]))**2
         n = Z.shape[0]
-        norm = (n-1)*numpy.log(numpy.linalg.det(numpy.dot(self.Mz,self.Mz.T))) + 2*n*numpy.log(self.sr)
+        norm = (n-1)*numpy.log(numpy.linalg.det(self.Sz)) + 2*n*numpy.log(self.sr)
 
         reg = self.l1 * sum(numpy.sum(abs(p)) for p in self.params)
         
@@ -212,4 +218,75 @@ class RSIS(object):
                     else:
                         setattr(self, name, numpy.identity(p.shape))
 
+
+class CD_RSIS(RSIS):
+
+
+    def __init__(self, *args, **kwargs):
+
+        super(CD_RSIS, self).__init__(*args, **kwargs)
+    
+        self._Sz = numpy.identity(self.k)
+        self.Sz_t = TT.dmatrix('Sz')
+        self.param_names = ['Phi', 'T', 'q']
+        del self.Mz
+        del self.Mz_t
+        
+        # recompute theano loss function with new Sz variable 
+        loss_t = self._loss_t() 
+        self.theano_loss = theano.function(self.theano_vars, loss_t)
+
+        grad = theano.grad(loss_t, self.theano_params)
+        self.theano_grad = theano.function(self.theano_vars, grad)
+    
+    @property
+    def Sz(self):
+        return self._Sz
+
+    @property
+    def theano_vars(self):
+        return [self.Phi_t, self.T_t, self.q_t, self.Sz_t, self.sr_t, self.X_t, self.R_t]        
+
+    @property
+    def theano_params(self):
+        return [self.Phi_t, self.T_t, self.q_t] 
+    
+    @property
+    def params(self):
+        return [self.Phi, self.T, self.q]
+
+    def set_noise_params(self, X, R):
+        
+        Z = self.encode(X)
+        n = Z.shape[0]
+        Rerr = R - self.reward(Z)
+        Zerr = Z[1:] - self.transition(Z[:-1])
+        self.sr = numpy.sum(Rerr**2) / n
+        self._Sz = numpy.dot(Zerr.T, Zerr) / (n-1)
+
+    def loss(self, X, R):
+        ''' callable, takes array of features X and rewards R and returns the
+        loss given the current set of parameters. Examples through time are
+        indexed by row '''
+
+        return self.theano_loss(self.Phi, self.T, self.q, self.Sz, self.sr, X, R)
+
+    def grad(self, X, R):
+        ''' returns gradient at the current parameters with the given inputs X
+        and R. '''
+
+        return self.theano_grad(self.Phi, self.T, self.q, self.Sz, self.sr, X, R)
+
+    def optimize_loss(self, params, X, R):
+        unpacked = self._unpack_params(params)
+        return self.theano_loss(*(unpacked + [self.Sz, self.sr, X, R]))
+
+    def optimize_grad(self, params, X, R):
+        unpacked = self._unpack_params(params)
+        grad = self.theano_grad(*(unpacked + [self.Sz, self.sr, X, R]))
+        return self._flatten(grad)
+
+
+
+    
 

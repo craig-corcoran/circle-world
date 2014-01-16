@@ -1,3 +1,4 @@
+import os
 import copy
 import numpy 
 import scipy.optimize
@@ -7,7 +8,7 @@ import matplotlib.gridspec as gridspec
 import rsis
 from features import FourierFeatureMap
 from domains import CircleWorld
-from model import RSIS
+from model import RSIS, CD_RSIS
 
 logger = rsis.get_logger(__name__)
 
@@ -78,6 +79,9 @@ def main(
         l1 = 2e-4,
         shift = 1e-3,
         ):
+
+    # move previous plots to old folder
+    os.system('mv rsis/plots/learned_basis* rsis/plots/old/')
     
     cworld = CircleWorld()
     fmap = FourierFeatureMap(N, use_sin = False)
@@ -105,9 +109,9 @@ def main(
         logger.info('delta theta: %.5f' % delta)
 
         phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
-        M_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Mz)
+        S_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Sz)
         logger.info('Phi column norms: ' + str(phi_norms))
-        logger.info('Mz column norms: ' + str(M_norms))
+        logger.info('Mz column norms: ' + str(S_norms))
         logger.info('loss components: ' + str(zip(['r', 'z', 'norm', 'reg'], 
                                 map(str,model.unscaled_losses(X_test,R_test)))))
 
@@ -118,7 +122,8 @@ def main(
 
     view_position_scatterplot(cworld.get_samples(n)[0])
 
-    model = RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
+    #model = RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
+    model = CD_RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
 
     try:
         while (waiting < patience):
@@ -131,7 +136,9 @@ def main(
 
             # collect new sample from the domain
             X, R = sample_circle_world(n)
+            
             try:
+                model.set_noise_params(X,R)
                 model.set_params(
                     scipy.optimize.fmin_cg(
                                 model.optimize_loss, model.flat_params, model.optimize_grad,
@@ -161,8 +168,9 @@ def main(
                     waiting += 1
                     logger.info('iters without better loss: %i' % int(waiting))
 
-            except ValueError:
-                
+            except ValueError as e:
+                print e
+                assert False
                 #model.reset_nans()
                 logger.info('resetting parameters because of nans')
 
