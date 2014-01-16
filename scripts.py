@@ -5,9 +5,6 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
 import rsis
-from features import FourierFeatureMap
-from domains import CircleWorld
-from model import RSIS
 
 logger = rsis.get_logger(__name__)
 
@@ -54,7 +51,7 @@ def view_fourier_basis(N = 10, n_plot = 64,
                        shuffle = False, last = False, use_sin = False):
     # plot a regular grid
     P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-    fmap = FourierFeatureMap(N, use_sin)
+    fmap = rsis.FourierFeatureMap(N, use_sin)
     X = fmap.transform(P)
 
     if shuffle: # shuffle the columns of X
@@ -79,8 +76,8 @@ def main(
         shift = 1e-3,
         ):
     
-    cworld = CircleWorld()
-    fmap = FourierFeatureMap(N, use_sin = False)
+    cworld = rsis.CircleWorld()
+    fmap = rsis.FourierFeatureMap(N, use_sin = False)
 
     it = 0
     waiting = 0
@@ -118,7 +115,7 @@ def main(
 
     view_position_scatterplot(cworld.get_samples(n)[0])
 
-    model = RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
+    model = rsis.RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
 
     try:
         while (waiting < patience):
@@ -175,10 +172,4 @@ def main(
 
 
 if __name__ == '__main__':
-    #view_fourier_basis(N = 15, n_plot = 64, 
-    #                   shuffle = False, last = False, use_sin = False)
-    #test_circleWorld()
-    #test_ROML()
     rsis.script(main)
-
-
