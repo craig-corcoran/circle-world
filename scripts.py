@@ -22,16 +22,14 @@ logger = rsis.get_logger(__name__)
 # performance measure
 # check for sign changes and set to zero
 
-def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
+def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
     plt.clf()
-    n_sp1 = numpy.sqrt(n_plot) if n_plot > 2 else n_plot
-    n_sp2 = n_sp1 if n_plot > 2 else 1
     side = numpy.sqrt(X.shape[0])
-    gs = gridspec.GridSpec(int(n_sp1), int(n_sp2))
+    gs = gridspec.GridSpec(n_sp1, n_sp2)
     gs.update(wspace=0., hspace=0.)
 
     lim = abs(X).max()
-    for i in xrange(n_plot):
+    for i in xrange(min(n_sp1 * n_sp2, X.shape[1])):
         ax = plt.subplot(gs[i])
         ax.xaxis.set_visible(False)
         ax.yaxis.set_visible(False)
@@ -43,12 +41,12 @@ def plot_filters(X, n_plot, file_name = 'basis.png', last = False):
                   vmax = lim,
                   interpolation = 'nearest')
 
-    plt.tight_layout()
+    plt.gcf().set_size_inches((n_sp2 / 2., n_sp1 / 2.))
     plt.savefig(file_name)
 
 
-def view_fourier_basis(N = 10, n_plot = 64,
-                       shuffle = False, last = False, use_sin = False):
+def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 15,
+                       shuffle = False, last = False, use_sin = True):
     # plot a regular grid
     P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
     fmap = rsis.FourierFeatureMap(N, use_sin)
@@ -57,11 +55,12 @@ def view_fourier_basis(N = 10, n_plot = 64,
     if shuffle: # shuffle the columns of X
         numpy.random.shuffle(numpy.transpose(X))
 
-    plot_filters(X, n_plot, 'rsis/plots/fourier_basis.png', last)
+    plot_filters(X, (n_sp1, n_sp2), 'plots/fourier_basis.png', last)
+
 
 def view_position_scatterplot(P):
     plt.scatter(P[:,0], P[:,1])
-    plt.savefig('rsis/plots/scatter.png')
+    plt.savefig('plots/scatter.png')
 
 
 def main(
@@ -74,10 +73,11 @@ def main(
         patience=10, # number of bad steps before stopping
         l1 = 2e-4,
         shift = 1e-3,
+        use_sin = False,
         ):
     
     cworld = rsis.CircleWorld()
-    fmap = rsis.FourierFeatureMap(N, use_sin = False)
+    fmap = rsis.FourierFeatureMap(N, use_sin = use_sin)
 
     it = 0
     waiting = 0
@@ -95,7 +95,8 @@ def main(
         P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
         X = fmap.transform(P)
         Z = model.encode(X)
-        plot_filters(Z, k, 'rsis/plots/learned_basis_%05d.png' % it)
+        l = int(numpy.sqrt(k))
+        plot_filters(Z, (l, l), 'plots/learned_basis_%05d.png' % it)
 
     def log():
         logger.info('loss improvement: %.5f' % numpy.sum(best_loss-loss))
