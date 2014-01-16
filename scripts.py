@@ -73,7 +73,7 @@ def main(
         patience=10, # number of bad steps before stopping
         l1 = 2e-4,
         shift = 1e-3,
-        use_sin = False,
+        use_sin = True,
         ):
     
     cworld = rsis.CircleWorld()
