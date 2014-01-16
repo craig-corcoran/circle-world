@@ -75,12 +75,12 @@ def main(
         min_imp = 1e-6, # min loss improvement
         min_delta = 1e-6, # min parameter change
         patience=10, # number of bad steps before stopping
-        l1 = 2e-1,
+        l1 = 2e-4,
+        shift = 1e-3,
         ):
     
     cworld = CircleWorld()
-    model = RSIS((N//2+1)**2, k, l1 = l1)
-    fmap = FourierFeatureMap(N)
+    fmap = FourierFeatureMap(N, use_sin = False)
 
     it = 0
     waiting = 0
@@ -90,8 +90,6 @@ def main(
     def sample_circle_world(n):
         P, R = cworld.get_samples(n)
         X = fmap.transform(P)
-        assert X.shape == (n, (N//2+1)**2)
-        
         return X, R
 
     def plot_learned(N):
@@ -105,7 +103,9 @@ def main(
     X_test, R_test = sample_circle_world(2*n)
 
     view_position_scatterplot(cworld.get_samples(n)[0])
-     
+
+    model = RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
+
     try:
         while (waiting < patience):
             

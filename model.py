@@ -14,7 +14,7 @@ class RSIS(object):
                 w = None, # value function weights; v(x) = w' Phi x
                 Mz = None, # transition noise, kxl where l <= k
                 sr = None, # reward noise
-                #shift = 1e-12,
+                shift = 1e-12,
                 l1 = 1e-3, # l1 regularization constant
                 init_scale = 1e-1,
                 ):
@@ -27,7 +27,7 @@ class RSIS(object):
         self.Mz = numpy.identity(k) if Mz is None else Mz
         self.Sz = numpy.dot(self.Mz,self.Mz.T)
         self.sr = numpy.array(1.) if sr  is None else sr
-        #self.inv_shift = shift*numpy.identity(k)
+        self.inv_shift = shift*numpy.identity(k)
         self.l1 = l1
         self.init_scale = init_scale
         self.param_names = ['Phi', 'T', 'q', 'Mz', 'sr']
@@ -42,7 +42,7 @@ class RSIS(object):
         self.R_t = TT.dvector('R')
 
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
-        #self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
+        self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
     
         # compute theano loss function and add l1 regularization
         loss_t = self._loss_t() 
@@ -124,11 +124,11 @@ class RSIS(object):
         #return self.R_t - TT.dot(self.Z_t, self.q_t)
         rerr = TT.sum(TT.sqr(self.R_t - self._reward_t(self.Z_t)))/self.sr_t**2
         zerr_v = self.Z_t[1:] - self._transition_t(self.Z_t[:-1])
-        zerr_vp = TT.dot(zerr_v, LA.matrix_inverse(self.Sz_t))
+        zerr_vp = TT.dot(zerr_v, LA.matrix_inverse(self.Sz_t+self.inv_shift_t))
         zerr = TT.sum(TT.mul(zerr_v, zerr_vp))
 
         n = TT.sum(TT.ones_like(self.R_t))
-        norm = (n-1)*TT.log(LA.det(self.Sz_t)) + 2*n*TT.log(self.sr_t)
+        norm = (n-1)*TT.log(LA.det(self.Sz_t+self.inv_shift_t)) + 2*n*TT.log(self.sr_t)
 
         reg = self.l1 * sum(TT.sum(abs(p)) for p in self.theano_params)
 
@@ -142,7 +142,7 @@ class RSIS(object):
         Z = self.encode(X)
         rerr = numpy.sum((R - self.reward(Z))**2)/self.sr**2
         zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
-        zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz)) #n-1 by k
+        zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz+self.inv_shift)) #n-1 by k
         zerr = numpy.sum(numpy.multiply(zerr_vp, zerr_v))
 
         # TODO remove, move to tests
@@ -157,7 +157,7 @@ class RSIS(object):
             assert abs(zerr - other_zerr) < 1e-10
 
         n = Z.shape[0]
-        norm = (n-1)*numpy.log(numpy.linalg.det(self.Sz)) + 2*n*numpy.log(self.sr)
+        norm = (n-1)*numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + 2*n*numpy.log(self.sr)
 
         reg = self.l1 * sum(numpy.sum(abs(p)) for p in self.params)
 
@@ -178,7 +178,7 @@ class RSIS(object):
 
     def optimize_loss(self, params, X, R):
         unpacked = self._unpack_params(params)
-        print zip(self.param_names, unpacked)
+        #print zip(self.param_names, unpacked)
         return self.theano_loss(*(unpacked + [X, R]))
 
     def optimize_grad(self, params, X, R):
@@ -189,14 +189,14 @@ class RSIS(object):
     def reset_nans(self):
         
         for i, name in enumerate(self.param_names): 
-            p = self.__getattr__(name)
+            p = getattr(self, name)
             if numpy.isnan(p).any():
                 if name in ['Phi', 'q']:
-                    self.__setattr__(name, self.init_scale * numpy.random.standard_normal(numpy.shape(p)))
+                    setattr(self, name, self.init_scale * numpy.random.standard_normal(numpy.shape(p)))
                 else:
                     if p.shape == ():                    
-                        self.__setattr__(name, numpy.array(1.))
+                        setattr(self, name, numpy.array(1.))
                     else:
-                        self.__setattr__(name, numpy.identity(p.shape))
+                        setattr(self, name, numpy.identity(p.shape))
 
 
