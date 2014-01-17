@@ -70,9 +70,9 @@ def main(
         max_iter = 3, # max number of cg optimizer steps per iteration
         min_imp = 1e-6, # min loss improvement
         min_delta = 1e-6, # min parameter change
-        patience=10, # number of bad steps before stopping
-        l1 = 2e-4,
-        shift = 1e-3,
+        patience = 10, # number of bad steps before stopping
+        l1 = 1e-6,
+        shift = 1e-9,
         use_sin = True,
         ):
 
@@ -102,18 +102,27 @@ def main(
         plot_filters(Z, (l, l), 'plots/learned_basis_%05d.png' % it)
 
     def log():
-        logger.info('loss improvement: %.5f' % numpy.sum(best_loss-loss))
-        logger.info('delta theta: %.5f' % delta)
+        logger.info('train loss: %.5f', model.loss(X, R))
+        logger.info('test loss: %.5f', model.loss(X_test, R_test))
 
         phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
         S_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Sz)
+        T_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.T)
         logger.info('Phi column norms: ' + str(phi_norms))
-        logger.info('Mz column norms: ' + str(S_norms))
-        logger.info('loss components: ' + str(zip(['r', 'z', 'norm', 'reg'], 
-                                map(str,model.unscaled_losses(X_test,R_test)))))
+        logger.info('Sz column norms: ' + str(S_norms))
+        logger.info('T column norms: ' + str(T_norms))
+        logger.info('q norm: ' + str(numpy.linalg.norm(model.q)))
+        logger.info('s: ' + str(model.sr))
 
-        if (it % 10) == 1:
-            plot_learned(4*N)
+        r, z, n, l = model._loss(X_test, R_test)
+        logger.info('loss components: r %f z %f norm %f = %f -- reg %f',
+                    r, z, n, r + z + n, l)
+
+        r, z, n, l = model.unscaled_loss(X_test, R_test)
+        logger.info('unscaled loss components: r %f z %f norm %f = %f -- reg %f',
+                    r, z, n, r + z + n, l)
+
+        plot_learned(4*N)
 
     X_test, R_test = sample_circle_world(2*n)
 
@@ -123,59 +132,21 @@ def main(
     model = rsis.CD_RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
 
     try:
-        while (waiting < patience):
-            
-            it += 1
-            
+        for it in range(100):
             logger.info('*** iteration ' + str(it) + '***')
-            
-            old_params = model.flat_params
-
-            # collect new sample from the domain
             X, R = sample_circle_world(n)
-            
-            try:
-                model.set_noise_params(X,R)
-                model.set_params(
-                    scipy.optimize.fmin_cg(
-                                model.optimize_loss, model.flat_params, model.optimize_grad,
-                                args = (X, R),
-                                full_output = False,
-                                maxiter = max_iter)
-                                )
-
-                delta = numpy.sum((old_params-model.flat_params)**2)                
-                loss = model.loss(X_test, R_test)
-
-                log()
-                
-                if loss < best_loss:
-                    
-                    if ((best_loss - loss) / abs(best_loss) > min_imp) or (delta > min_delta):
-                        waiting = 0
-                    else:
-                        waiting += 1
-                        logger.info('iters without better loss: %i' % int(waiting))
-
-                    best_loss = loss
-                    best_params = model.flat_params # copy.deepcopy
-                    logger.info('new best loss: %.2f' %  best_loss)
-                    
-                else:
-                    waiting += 1
-                    logger.info('iters without better loss: %i' % int(waiting))
-
-            except ValueError as e:
-                print e
-                assert False
-                #model.reset_nans()
-                logger.info('resetting parameters because of nans')
-
+            model.set_noise_params(X,R)
+            model.set_params(
+                scipy.optimize.fmin_cg(
+                    model.optimize_loss, model.flat_params, model.optimize_grad,
+                    args = (X, R),
+                    full_output = False,
+                    maxiter = max_iter)
+            )
+            log()
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
-    
-    # set params to best params from last loss
-    model.set_params(best_params)
+
     plot_learned(4*N)
 
 

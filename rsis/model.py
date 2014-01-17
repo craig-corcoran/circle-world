@@ -16,19 +16,20 @@ class RSIS(object):
                 sr = None, # reward noise
                 shift = 1e-12,
                 l1 = 1e-3, # l1 regularization constant
-                init_scale = 1e-1,
+                init_scale = 1e-2,
                 ):
         self.k = k
         self.d = d
         self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
         #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
         self.T = numpy.identity(k) if T is None else T
-        self.q = init_scale*numpy.random.standard_normal(k) if q is None else q
+        self.q = 100*init_scale*numpy.random.standard_normal(k) if q is None else q
         #self.q = numpy.zeros(k) if q is None else q
         #self.w = numpy.random.standard_normal(k) if w is None else w
         self.Mz = numpy.identity(k) if Mz is None else Mz
         #self.Sz = numpy.dot(self.Mz,self.Mz.T)
         self.sr = numpy.array(1.) if sr  is None else sr
+        self.shift = shift
         self.inv_shift = shift*numpy.identity(k)
         self.l1 = l1
         self.init_scale = init_scale
@@ -124,7 +125,6 @@ class RSIS(object):
     def _encode_t(self, x):
         return TT.dot(x, self.Phi_t)
 
-
     def _loss_t(self):
         ''' Generates the theano loss variable '''
         #return self.R_t - TT.dot(self.Z_t, self.q_t)
@@ -134,14 +134,15 @@ class RSIS(object):
         zerr = TT.sum(TT.mul(zerr_v, zerr_vp))
 
         n = TT.sum(TT.ones_like(self.R_t))
-        norm = (n-1)*TT.log(LA.det(self.Sz_t+self.inv_shift_t)) + 2*n*TT.log(self.sr_t)
+        ln2pi = numpy.log(2 * numpy.pi)
+        norm = (n-1)*(TT.log(LA.det(self.Sz_t+self.inv_shift_t)) + self.k*ln2pi) + \
+               n*(2*TT.log(self.sr_t) + ln2pi)
 
-        reg = self.l1 * sum(TT.sum(abs(p)) for p in self.theano_params)
+        reg = self.l1 * sum(TT.sum(p * p) for p in self.theano_params)
 
-        return TT.sum(zerr + rerr + norm) / (n-1) + reg
+        return TT.sum(zerr / self.k + rerr + norm) / (n-1) + reg
 
-    def _loss(self, X, R, debug = False):
-       
+    def _loss(self, X, R):
         ''' numpy version of loss function '''
 
         Z = self.encode(X)
@@ -150,23 +151,31 @@ class RSIS(object):
         zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz+self.inv_shift)) #n-1 by k
         zerr = numpy.sum(numpy.multiply(zerr_vp, zerr_v))
 
-        # TODO remove, move to tests
-        if debug:
-            inv = numpy.linalg.inv(self.Sz)
-            other_zerr = 0.
-            for ii in xrange(Z.shape[0]-1):
-                v = Z[ii+1,:] - self.transition(Z[ii,:])
-                vp = numpy.dot(v, inv)
-                other_zerr += numpy.dot(v, vp.T)
+        n = Z.shape[0]
+        ln2pi = numpy.log(2 * numpy.pi)
+        norm = (n-1)*(numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + self.k*ln2pi) + \
+               n*(2*numpy.log(self.sr) + ln2pi)
 
-            assert abs(zerr - other_zerr) < 1e-10
+        reg = self.l1 * sum(numpy.sum(p * p) for p in self.params)
+
+        return rerr / (n-1), zerr / (n-1) / self.k, norm / (n-1), reg
+
+    def unscaled_loss(self, X, R):
+        ''' numpy version of unscaled loss function '''
+
+        Z = self.encode(X)
+        rerr = numpy.sum((R - self.reward(Z))**2)
+        zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
+        zerr = numpy.sum(numpy.multiply(zerr_v, zerr_v))
 
         n = Z.shape[0]
-        norm = (n-1)*numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + 2*n*numpy.log(self.sr)
+        ln2pi = numpy.log(2 * numpy.pi)
+        norm = (n-1)*(numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + self.k*ln2pi) + \
+               n*(2*numpy.log(self.sr) + ln2pi)
 
-        reg = self.l1 * sum(numpy.sum(abs(p)) for p in self.params)
+        reg = self.l1 * sum(numpy.sum(p * p) for p in self.params)
 
-        return (rerr + zerr + norm) / (n-1) + reg
+        return rerr / (n-1), zerr / (n-1) / self.k, norm / (n-1), reg
 
     def loss(self, X, R):
         ''' callable, takes array of features X and rewards R and returns the
@@ -174,20 +183,6 @@ class RSIS(object):
         indexed by row '''
 
         return self.theano_loss(self.Phi, self.T, self.q, self.Mz, self.sr, X, R)
-
-    def unscaled_losses(self, X, R):
-        ''' returns a list of loss components, not scaled by the guassian
-        parameters'''
-
-        Z = self.encode(X)
-        rerr = numpy.sum((R - self.reward(Z))**2)
-        zerr =  numpy.sum(Z[1:] - self.transition(Z[:-1]))**2
-        n = Z.shape[0]
-        norm = (n-1)*numpy.log(numpy.linalg.det(self.Sz)) + 2*n*numpy.log(self.sr)
-
-        reg = self.l1 * sum(numpy.sum(abs(p)) for p in self.params)
-        
-        return rerr/(n-1), zerr/(n-1), norm/(n-1), reg
 
     def grad(self, X, R):
         ''' returns gradient at the current parameters with the given inputs X
@@ -204,19 +199,6 @@ class RSIS(object):
         Phi, T, q, Mz, sr = self._unpack_params(params)
         grad = self.theano_grad(Phi, T, q, Mz, sr, X, R)
         return self._flatten(grad)
-
-    def reset_nans(self):
-        
-        for i, name in enumerate(self.param_names): 
-            p = getattr(self, name)
-            if numpy.isnan(p).any():
-                if name in ['Phi', 'q']:
-                    setattr(self, name, self.init_scale * numpy.random.standard_normal(numpy.shape(p)))
-                else:
-                    if p.shape == ():                    
-                        setattr(self, name, numpy.array(1.))
-                    else:
-                        setattr(self, name, numpy.identity(p.shape))
 
 
 class CD_RSIS(RSIS):
@@ -261,8 +243,8 @@ class CD_RSIS(RSIS):
         n = Z.shape[0]
         Rerr = R - self.reward(Z)
         Zerr = Z[1:] - self.transition(Z[:-1])
-        self.sr = numpy.sum(Rerr**2) / n
-        self._Sz = numpy.dot(Zerr.T, Zerr) / (n-1)
+        self.sr = numpy.sqrt(numpy.sum(Rerr**2) / n) + self.shift
+        self._Sz = numpy.dot(Zerr.T, Zerr) / (n-1) + self.inv_shift
 
     def loss(self, X, R):
         ''' callable, takes array of features X and rewards R and returns the
