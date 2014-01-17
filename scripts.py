@@ -41,7 +41,7 @@ def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
                   vmax = lim,
                   interpolation = 'nearest')
 
-    plt.gcf().set_size_inches((n_sp2 / 2., n_sp1 / 2.))
+    #plt.gcf().set_size_inches((n_sp2 / 2., n_sp1 / 2.))
     plt.savefig(file_name)
 
 
@@ -68,24 +68,18 @@ def main(
         N = 20, # grid/basis resolution, num of fourier funcs: d = N/2+1, grid is [2Nx2N]
         k = 4,  # number of compressed features, Phi is [dxk]
         max_iter = 3, # max number of cg optimizer steps per iteration
-        min_imp = 1e-6, # min loss improvement
-        min_delta = 1e-6, # min parameter change
-        patience = 10, # number of bad steps before stopping
-        l1 = 1e-6,
-        shift = 1e-9,
-        use_sin = True,
+        l1 = 1e-4, # applied to Phi
+        l2 = 1e-6, # applied to self.params[1:]
+        shift = 1e-12,
         ):
 
     # move previous plots to old folder
-    os.system('mv rsis/plots/learned_basis* rsis/plots/old/')
+    os.system('mv plots/learned_basis* plots/old/')
     
     cworld = rsis.CircleWorld()
-    fmap = rsis.FourierFeatureMap(N, use_sin = use_sin)
+    fmap = rsis.FourierFeatureMap(N, use_sin = True)
 
     it = 0
-    waiting = 0
-    best_params = None
-    best_loss = 1.e20
 
     def sample_circle_world(n):
         P, R = cworld.get_samples(n)
@@ -124,15 +118,15 @@ def main(
 
         plot_learned(4*N)
 
-    X_test, R_test = sample_circle_world(2*n)
+    X_test, R_test = sample_circle_world(4*n)
 
     view_position_scatterplot(cworld.get_samples(n)[0])
 
-    #model = RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
-    model = rsis.CD_RSIS(X_test.shape[1], k, l1 = l1, shift = shift)
+    #model = RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift)
+    model = rsis.CD_RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift)
 
     try:
-        for it in range(100):
+        for it in range(50):
             logger.info('*** iteration ' + str(it) + '***')
             X, R = sample_circle_world(n)
             model.set_noise_params(X,R)
