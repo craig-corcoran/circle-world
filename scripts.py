@@ -68,13 +68,14 @@ def main(
         N = 20, # grid/basis resolution, num of fourier funcs: d = N/2+1, grid is [2Nx2N]
         k = 4,  # number of compressed features, Phi is [dxk]
         max_iter = 3, # max number of cg optimizer steps per iteration
-        l1 = 1e-4, # applied to Phi
-        l2 = 1e-6, # applied to self.params[1:]
+        l1 = 2e-5, # applied to Phi
+        l2 = 1e-8, # applied to self.params[1:]
         shift = 1e-12,
+        lock_phi0 = False, # allow the first column of Phi to change when ascending log prob
         ):
 
     # move previous plots to old folder
-    os.system('mv plots/learned_basis* plots/old/')
+    os.system('rm plots/learned_basis*')
     
     cworld = rsis.CircleWorld()
     fmap = rsis.FourierFeatureMap(N, use_sin = True)
@@ -116,20 +117,32 @@ def main(
         logger.info('unscaled loss components: r %f z %f norm %f = %f -- reg %f',
                     r, z, n, r + z + n, l)
 
-        plot_learned(4*N)
+        plot_learned(2*N)
 
     X_test, R_test = sample_circle_world(4*n)
 
     view_position_scatterplot(cworld.get_samples(n)[0])
 
     #model = RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift)
-    model = rsis.CD_RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift)
+    #model = rsis.CD_RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift)
+    model = rsis.AR_RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift, lock_phi0 = lock_phi0)
 
     try:
         for it in range(50):
             logger.info('*** iteration ' + str(it) + '***')
             X, R = sample_circle_world(n)
-            model.set_noise_params(X,R)
+            #model.set_noise_params(X,R)
+            
+            logger.info('descending reward loss')
+            model.set_params(
+                scipy.optimize.fmin_cg(
+                    model.optimize_rew_loss, model.flat_params, model.optimize_rew_grad,
+                    args = (X, R),
+                    full_output = False,
+                    maxiter = max_iter)
+            )
+                        
+            logger.info('descending neg log probability')
             model.set_params(
                 scipy.optimize.fmin_cg(
                     model.optimize_loss, model.flat_params, model.optimize_grad,
@@ -140,8 +153,6 @@ def main(
             log()
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
-
-    plot_learned(4*N)
 
 
 if __name__ == '__main__':

@@ -17,14 +17,14 @@ class RSIS(object):
                 l1 = 1e-3, # l1 regularization constant
                 l2 = 1e-6, # l2 regularization constant
                 shift = 1e-12,
-                init_scale = 1e-2,
+                init_scale = 1e-1,
                 ):
         self.k = k
         self.d = d
         self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
         #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
         self.T = numpy.identity(k) if T is None else T
-        self.q = 100*init_scale*numpy.random.standard_normal(k) if q is None else q
+        self.q = init_scale*numpy.random.standard_normal(k) if q is None else q
         #self.q = numpy.zeros(k) if q is None else q
         self.Mz = numpy.identity(k) if Mz is None else Mz
         self.sr = numpy.array(1.) if sr  is None else sr
@@ -33,7 +33,6 @@ class RSIS(object):
         self.shift = shift
         self.inv_shift = shift*numpy.identity(k)
         self.init_scale = init_scale
-        self.param_names = ['Phi', 'T', 'q', 'Mz', 'sr']
 
         self.Phi_t = TT.dmatrix('Phi')
         self.T_t = TT.dmatrix('T')
@@ -46,6 +45,8 @@ class RSIS(object):
 
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
         self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
+
+        self.param_names = [x.name for x in self.theano_params]
     
         # compute theano loss function 
         loss_t = self._loss_t() 
@@ -77,6 +78,10 @@ class RSIS(object):
     @property
     def Sz(self):
         return numpy.dot(self.Mz,self.Mz.T)
+
+    @property
+    def args(self):
+        return []
 
     @staticmethod
     def _flatten(params):
@@ -124,6 +129,16 @@ class RSIS(object):
     def _encode_t(self, x):
         return TT.dot(x, self.Phi_t)
 
+    def _regularization(self):
+        reg = self.l1 * numpy.sum(abs(self.Phi))
+        reg += self.l2 * sum(numpy.sum(p**2) for p in self.params[1:]) # TODO what about S = M*M.T
+        return reg
+
+    def _regularization_t(self):
+        reg = self.l1 * TT.sum(abs(self.Phi_t))
+        reg += self.l2 * sum(TT.sum(p * p) for p in self.theano_params[1:])
+        return reg
+
     def _loss_t(self):
         ''' Generates the theano loss variable '''
         rerr = TT.sum(TT.sqr(self.R_t - self._reward_t(self.Z_t)))/self.sr_t**2
@@ -136,9 +151,7 @@ class RSIS(object):
         norm = (n-1)*(TT.log(LA.det(self.Sz_t+self.inv_shift_t)) + self.k*ln2pi) + \
                n*(2*TT.log(self.sr_t) + ln2pi)
 
-        #reg = self.l1 * TT.sum(TT.sum(p * p) for p in self.theano_params)
-        reg = self.l1 * TT.sum(abs(self.Phi_t))
-        reg += self.l2 * sum(TT.sum(p * p) for p in self.theano_params[1:])
+        reg = self._regularization_t()
 
         return TT.sum(zerr + rerr + norm) / (n-1) + reg
 
@@ -155,10 +168,9 @@ class RSIS(object):
         ln2pi = numpy.log(2 * numpy.pi)
         norm = (n-1)*(numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + self.k*ln2pi) + \
                n*(2*numpy.log(self.sr) + ln2pi)
-
-        reg = self.l1 * numpy.sum(abs(self.Phi))
-        reg += self.l2 * sum(numpy.sum(p**2) for p in self.params[1:]) # TODO what about S = M*M.T
-
+        
+        reg = self._regularization()
+        
         return rerr / (n-1), zerr / (n-1), norm / (n-1), reg
 
     def unscaled_loss(self, X, R):
@@ -184,22 +196,21 @@ class RSIS(object):
         loss given the current set of parameters. Examples through time are
         indexed by row '''
 
-        return self.theano_loss(self.Phi, self.T, self.q, self.Mz, self.sr, X, R)
+        return self.theano_loss(*(self.params + self.args + [X, R]))
 
     def grad(self, X, R):
         ''' returns gradient at the current parameters with the given inputs X
         and R. '''
 
-        return self.theano_grad(self.Phi, self.T, self.q, self.Mz, self.sr, X, R)
+        return self.theano_loss(*(self.params + self.args + [X, R]))
 
     def optimize_loss(self, params, X, R):
         unpacked = self._unpack_params(params)
-        #print zip(self.param_names, unpacked)
-        return self.theano_loss(*(unpacked + [X, R]))
+        return self.theano_loss(*(unpacked + self.args + [X, R]))
 
     def optimize_grad(self, params, X, R):
         unpacked = self._unpack_params(params)
-        grad = self.theano_grad(*(unpacked + [X, R]))
+        grad = self.theano_grad(*(unpacked + self.args + [X, R]))
         return self._flatten(grad)
 
 
@@ -212,7 +223,6 @@ class CD_RSIS(RSIS):
     
         self._Sz = numpy.identity(self.k)
         self.Sz_t = TT.dmatrix('Sz')
-        self.param_names = ['Phi', 'T', 'q']
         del self.Mz
         del self.Mz_t
         
@@ -238,7 +248,11 @@ class CD_RSIS(RSIS):
     @property
     def params(self):
         return [self.Phi, self.T, self.q]
-
+    
+    @property
+    def args(self):
+        return [self.Sz, self.sr]
+    
     def set_noise_params(self, X, R):
         
         Z = self.encode(X)
@@ -248,27 +262,61 @@ class CD_RSIS(RSIS):
         self.sr = numpy.sqrt(numpy.sum(Rerr**2) / n) 
         self._Sz = numpy.dot(Zerr.T, Zerr) / (n-1) 
 
-    def loss(self, X, R):
-        ''' callable, takes array of features X and rewards R and returns the
-        loss given the current set of parameters. Examples through time are
-        indexed by row '''
 
-        return self.theano_loss(self.Phi, self.T, self.q, self.Sz, self.sr, X, R)
+class AR_RSIS(CD_RSIS):
+    
+    def __init__(self, *args, **kwargs):
+        
+        self.lock_phi0 = kwargs.pop('lock_phi0')
+        super(AR_RSIS, self).__init__(*args, **kwargs)
+        
+        #self.phi_t = self.Phi_t[:,0]
 
-    def grad(self, X, R):
-        ''' returns gradient at the current parameters with the given inputs X
-        and R. '''
+        # bc q is always [100..], the gradient for the reward loss is zero 
+        # except for the first column of Phi 
+        #self.q = numpy.zeros_like(self.q)
+        #self.q[0] = 1.
+        
+        rerr_t = self._Rerr_t() 
+        self.reward_loss = theano.function(self.theano_vars, rerr_t, on_unused_input='ignore')
 
-        return self.theano_grad(self.Phi, self.T, self.q, self.Sz, self.sr, X, R)
+        rerr_grad_t = theano.grad(rerr_t, self.theano_params, disconnected_inputs='ignore')
+        self.reward_grad = theano.function(self.theano_vars, rerr_grad_t, on_unused_input='ignore')
 
-    def optimize_loss(self, params, X, R):
+    #@property
+    #def theano_params(self):
+        #return [self.Phi_t, self.T_t] 
+    
+    #@property
+    #def params(self):
+        #return [self.Phi, self.T]
+
+    #@property
+    #def args(self):
+        #return [self.q, self.Sz, self.sr]
+    
+    #@property
+    #def phi(self):
+        #return self.Phi[:,0]
+
+    def _Rerr_t(self):
+        return TT.sum((self.R_t - self._reward_t(self.Z_t))**2)
+        
+    def optimize_rew_loss(self, params, X, R):
         unpacked = self._unpack_params(params)
-        return self.theano_loss(*(unpacked + [self.Sz, self.sr, X, R]))
+        return self.reward_loss(*(unpacked + self.args + [X, R]))
+
+    def optimize_rew_grad(self, params, X, R):
+        unpacked = self._unpack_params(params)
+        grad = self.reward_grad(*(unpacked + self.args + [X, R]))
+        return self._flatten(grad)
 
     def optimize_grad(self, params, X, R):
-        unpacked = self._unpack_params(params)
-        grad = self.theano_grad(*(unpacked + [self.Sz, self.sr, X, R]))
-        return self._flatten(grad)
+        grad = super(AR_RSIS, self).optimize_grad(params, X, R)
+        if self.lock_phi0:
+            grad[:self.d] = 0.
+        return grad
+        
 
 
 
