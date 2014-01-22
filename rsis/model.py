@@ -3,6 +3,9 @@ import theano
 import theano.tensor as TT
 import theano.sandbox.linalg.ops as LA
 
+
+
+
 class RSIS(object):
 
     def __init__(self,
