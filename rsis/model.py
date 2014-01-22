@@ -3,11 +3,15 @@ import theano
 import theano.tensor as TT
 import theano.sandbox.linalg.ops as LA
 
+
+
+
 class RSIS(object):
 
     def __init__(self,
                 d, # dim of state rep (initial features)
                 k, # dim after linear transorm
+                h, # length of backups to do
                 Phi = None, # feature transform matrix f(x) = Phi x; [dxk]
                 T = None, # transition matrix; Tz_t = z_t+1
                 q = None, # reward function weights; r(x) = q' Phi x
@@ -19,11 +23,13 @@ class RSIS(object):
                 shift = 1e-12,
                 init_scale = 1e-1,
                 ):
-        self.k = k
         self.d = d
+        self.k = k
+        self.h = h
         self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
         #self.Phi = numpy.zeros((d,k)) if Phi is None else Phi
-        self.T = numpy.identity(k) if T is None else T
+        self.T = init_scale*numpy.random.standard_normal((k,k)) if T is None else T
+        #self.T = numpy.identity(k) if T is None else T
         self.q = init_scale*numpy.random.standard_normal(k) if q is None else q
         #self.q = numpy.zeros(k) if q is None else q
         self.Mz = numpy.identity(k) if Mz is None else Mz
@@ -33,6 +39,7 @@ class RSIS(object):
         self.shift = shift
         self.inv_shift = shift*numpy.identity(k)
         self.init_scale = init_scale
+        self.w = None # can solve for this upon value funct query
 
         self.Phi_t = TT.dmatrix('Phi')
         self.T_t = TT.dmatrix('T')
@@ -42,6 +49,8 @@ class RSIS(object):
         self.sr_t = TT.dscalar('sr')
         self.X_t = TT.dmatrix('X')
         self.R_t = TT.dvector('R')
+
+        self.n_t = TT.sum(TT.ones_like(self.R_t))
 
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
         self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
@@ -108,10 +117,15 @@ class RSIS(object):
             i = j
         return params
 
-    def value(self, z):
-        return numpy.dot(z, self.w)
+    def reward_func(self, x):
+        return self._reward(self.encode(x))
 
-    def reward(self, z):
+    def value_func(self, x, gam):
+        # w = q + gam * T * w  ->  w = (I - gam * T)^-1 q
+        self.w = numpy.linalg.solve(numpy.identity(self.T.shape[0]) - gam * self.T, self.q)
+        return numpy.dot(self.encode(x), self.w)
+
+    def _reward(self, z):
         return numpy.dot(z, self.q)
 
     def _reward_t(self, z):
@@ -129,7 +143,7 @@ class RSIS(object):
     def _encode_t(self, x):
         return TT.dot(x, self.Phi_t)
 
-    def _regularization(self):
+    def regularization(self):
         reg = self.l1 * numpy.sum(abs(self.Phi))
         reg += self.l2 * sum(numpy.sum(p**2) for p in self.params[1:]) # TODO what about S = M*M.T
         return reg
@@ -139,37 +153,55 @@ class RSIS(object):
         reg += self.l2 * sum(TT.sum(p * p) for p in self.theano_params[1:])
         return reg
 
+    def _reward_error_t(self):
+        return TT.sum((self.R_t - self._reward_t(self.Z_t))**2)/self.sr_t**2
+
+    def reward_error(self, Z, R):
+        return numpy.sum((R - self._reward(Z))**2)/self.sr**2
+
+    def _transition_error_t(self):
+        zerr = 0.
+        n_tot = 0.
+        for h in xrange(self.h):
+            zerr_v = self.Z_t[h+1:] - self._transition_t(self.Z_t[:-h-1])
+            zerr_vp = TT.dot(zerr_v, LA.matrix_inverse(self.Sz_t + self.inv_shift_t))
+            zerr += TT.sum(TT.mul(zerr_v, zerr_vp))
+            n_tot += self.n_t - h - 1
+        return zerr / n_tot * (self.n_t-1) # XXX
+
+    def transition_error(self, Z):
+        zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
+        zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz+self.inv_shift)) #n-1 by k
+        return numpy.sum(numpy.multiply(zerr_vp, zerr_v))
+
+    def _norm_t(self):
+        ln2pi = numpy.log(2 * numpy.pi)
+        return (self.n_t-1)*(TT.log(LA.det(self.Sz_t+self.inv_shift_t)) + self.k*ln2pi) + \
+               self.n_t*(2*TT.log(self.sr_t) + ln2pi)
+
+    def norm(self, n):
+        ln2pi = numpy.log(2 * numpy.pi)
+        return (n-1)*(numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + self.k*ln2pi) + \
+               n*(2*numpy.log(self.sr) + ln2pi)
+
     def _loss_t(self):
         ''' Generates the theano loss variable '''
-        rerr = TT.sum(TT.sqr(self.R_t - self._reward_t(self.Z_t)))/self.sr_t**2
-        zerr_v = self.Z_t[1:] - self._transition_t(self.Z_t[:-1])
-        zerr_vp = TT.dot(zerr_v, LA.matrix_inverse(self.Sz_t+self.inv_shift_t))
-        zerr = TT.sum(TT.mul(zerr_v, zerr_vp))
-
-        n = TT.sum(TT.ones_like(self.R_t))
-        ln2pi = numpy.log(2 * numpy.pi)
-        norm = (n-1)*(TT.log(LA.det(self.Sz_t+self.inv_shift_t)) + self.k*ln2pi) + \
-               n*(2*TT.log(self.sr_t) + ln2pi)
-
+        rerr = self._reward_error_t()
+        zerr = self._transition_error_t()
+        norm = self._norm_t()
         reg = self._regularization_t()
 
-        return TT.sum(zerr + rerr + norm) / (n-1) + reg
+        return TT.sum(zerr + rerr + norm) / (self.n_t-1) + reg
 
     def _loss(self, X, R):
         ''' numpy version of loss function '''
 
         Z = self.encode(X)
-        rerr = numpy.sum((R - self.reward(Z))**2)/self.sr**2
-        zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
-        zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz+self.inv_shift)) #n-1 by k
-        zerr = numpy.sum(numpy.multiply(zerr_vp, zerr_v))
-
         n = Z.shape[0]
-        ln2pi = numpy.log(2 * numpy.pi)
-        norm = (n-1)*(numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + self.k*ln2pi) + \
-               n*(2*numpy.log(self.sr) + ln2pi)
-        
-        reg = self._regularization()
+        rerr = self.reward_error(Z,R)
+        zerr = self.transition_error(Z)
+        norm = self.norm(n)
+        reg = self.regularization()
         
         return rerr / (n-1), zerr / (n-1), norm / (n-1), reg
 
@@ -177,17 +209,12 @@ class RSIS(object):
         ''' numpy version of unscaled loss function '''
 
         Z = self.encode(X)
-        rerr = numpy.sum((R - self.reward(Z))**2)
+        n = Z.shape[0]
+        rerr = numpy.sum((R - self._reward(Z))**2)
         zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
         zerr = numpy.sum(numpy.multiply(zerr_v, zerr_v))
-
-        n = Z.shape[0]
-        ln2pi = numpy.log(2 * numpy.pi)
-        norm = (n-1)*(numpy.log(numpy.linalg.det(self.Sz+self.inv_shift)) + self.k*ln2pi) + \
-               n*(2*numpy.log(self.sr) + ln2pi)
-
-        reg = self.l1 * numpy.sum(abs(self.Phi))
-        reg += self.l2 * sum(numpy.sum(p**2) for p in self.params[1:]) # TODO what about S = M*M.T
+        norm = self.norm(n)
+        reg = self.regularization()
 
         return rerr / (n-1), zerr / (n-1), norm / (n-1), reg
 
@@ -257,17 +284,57 @@ class CD_RSIS(RSIS):
         
         Z = self.encode(X)
         n = Z.shape[0]
-        Rerr = R - self.reward(Z)
+        Rerr = R - self._reward(Z)
         Zerr = Z[1:] - self.transition(Z[:-1])
         self.sr = numpy.sqrt(numpy.sum(Rerr**2) / n) 
         self._Sz = numpy.dot(Zerr.T, Zerr) / (n-1) 
+
+class DYN_RSIS(CD_RSIS):
+    
+    ''' dynamic rsis model which tracks the full dynamics of X '''
+    def __init__(self,  *args, **kwargs):
+        #U = kwargs.pop('U')
+        #self.U = self.init_scale * numpy.random.standard_normal((self.d, self.k)) if U is None else U
+        #self.U_t = TT.dmatrix('U')
+        self.dyn_wt = kwargs.pop('dyn_wt')
+        super(DYN_RSIS, self).__init__(*args, **kwargs)
+    
+    def decode(self, z):
+        return numpy.dot(z, self.Phi.T)
+
+    def _decode_t(self, z):
+        return TT.dot(z, self.Phi_t.T)
+
+    def dynamics_loss(self, X):
+        return numpy.sum((X[1:] - self.decode(self.transition(self.encode(X[:-1]))))**2)
+
+    def _dynamics_loss_t(self):
+        return TT.sum((self.X_t[1:] - self._decode_t(self._transition_t(self._encode_t(self.X_t[:-1]))))**2) 
+
+    def _loss_t(self):
+        ''' Generates the theano loss variable '''
+        return super(DYN_RSIS, self)._loss_t() + self.dyn_wt * self._dynamics_loss_t() / (self.n_t-1)
+
+    def _loss(self, X, R):
+        ''' numpy version of loss function '''
+        rerr, zerr, norm, reg = super(DYN_RSIS, self)._loss(X,R)        
+        return rerr, zerr, norm, reg, self.dyn_wt * self.dynamics_loss(X) 
+
+    def unscaled_loss(self, X, R):
+        ''' numpy version of unscaled loss function '''
+        rerr, zerr, norm, reg = super(DYN_RSIS, self).unscaled_loss(X,R)
+        return rerr, zerr, norm, reg, self.dynamics_loss(X) 
+
 
 
 class AR_RSIS(CD_RSIS):
     
     def __init__(self, *args, **kwargs):
         
+        self.offdiag = kwargs.pop('offdiag')
         self.lock_phi0 = kwargs.pop('lock_phi0')
+        if self.lock_phi0 is None:
+            self.lock_phi0 = False
         super(AR_RSIS, self).__init__(*args, **kwargs)
         
         #self.phi_t = self.Phi_t[:,0]
@@ -277,7 +344,7 @@ class AR_RSIS(CD_RSIS):
         #self.q = numpy.zeros_like(self.q)
         #self.q[0] = 1.
         
-        rerr_t = self._Rerr_t() 
+        rerr_t = self._reward_error_t() 
         self.reward_loss = theano.function(self.theano_vars, rerr_t, on_unused_input='ignore')
 
         rerr_grad_t = theano.grad(rerr_t, self.theano_params, disconnected_inputs='ignore')
@@ -299,8 +366,51 @@ class AR_RSIS(CD_RSIS):
     #def phi(self):
         #return self.Phi[:,0]
 
-    def _Rerr_t(self):
-        return TT.sum((self.R_t - self._reward_t(self.Z_t))**2)
+    def _loss(self, X, R):
+        ''' numpy version of loss function '''
+
+        Z = self.encode(X)
+        n = Z.shape[0]
+        rerr = self.reward_error(Z,R)
+        zerr = self.transition_error(Z)
+        norm = self.norm(n)
+        reg = self.regularization(Z)
+        
+        return rerr / (n-1), zerr / (n-1), norm / (n-1), reg
+
+    def unscaled_loss(self, X, R):
+        ''' numpy version of unscaled loss function '''
+
+        Z = self.encode(X)
+        n = Z.shape[0]
+        rerr = numpy.sum((R - self._reward(Z))**2)
+        zerr_v = (Z[1:] - self.transition(Z[:-1])) #n-1 by k
+        zerr = numpy.sum(numpy.multiply(zerr_v, zerr_v))
+        norm = self.norm(n)
+        reg = self.regularization(Z)
+
+        return rerr / (n-1), zerr / (n-1), norm / (n-1), reg
+
+        
+
+    def regularization(self, Z):
+        reg = super(AR_RSIS, self).regularization(Z)
+        n = Z.shape[0]
+        #C = numpy.dot(self.Phi.T, self.Phi) / n
+        C = numpy.dot(Z.T, Z) / n
+        #numpy.fill_diagonal(C, 0) # modifies in place
+        #reg += self.offdiag * numpy.sum(abs(C))
+        reg += self.offdiag * numpy.sum(numpy.abs(C - numpy.identity(C.shape[0]))) 
+        return reg
+
+    def _regularization_t(self):
+        reg = super(AR_RSIS, self)._regularization_t()
+        #C = TT.dot(self.Phi_t.T, self.Phi_t) / self.n_t
+        C = TT.dot(self.Z_t.T, self.Z_t) / self.n_t 
+        #C = TT.fill_diagonal(C, 0)
+        #reg += self.offdiag * TT.sum(abs(C)) 
+        reg += self.offdiag * TT.sum(abs(C - TT.identity_like(C))) 
+        return reg
         
     def optimize_rew_loss(self, params, X, R):
         unpacked = self._unpack_params(params)
