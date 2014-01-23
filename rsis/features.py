@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+import numpy.random as rng
 import itertools as it
 
 class FourierFeatureMap(object):
@@ -20,23 +21,15 @@ class FourierFeatureMap(object):
 
 
 class TileFeatureMap(object):
-    def __init__(self, depth = 3, size = 1.):
+    def __init__(self, N, size = 1.):
         W = []
-        active = [[-size, -size, size, size]]
-        for _ in range(depth):
-            new = []
-            for x1, y1, x2, y2 in active:
-                xm = (x1 + x2) / 2.
-                ym = (y1 + y2) / 2.
-                new.append([x1, y1, xm, ym])
-                new.append([x1, ym, xm, y2])
-                new.append([xm, ym, x2, y2])
-                new.append([xm, y1, x2, ym])
-            active = new
-            W.extend(active)
+        for s in size * rng.uniform(0.1, 0.9, size=N):
+            x = rng.uniform(-size, size - s)
+            y = rng.uniform(-size, size - s)
+            W.append([x, y, x + s, y + s])
         self.X1, self.Y1, self.X2, self.Y2 = np.array(W).T
 
     def transform(self, P):
         return np.array([
-            (self.X1 <= x) & (x < self.X2) & (self.Y1 <= y) & (y < self.Y2)
+            (self.X1 <= x) & (x <= self.X2) & (self.Y1 <= y) & (y <= self.Y2)
             for x, y in P], int)
