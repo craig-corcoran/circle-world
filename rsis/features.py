@@ -1,22 +1,21 @@
-import logging
 import numpy as np
 import itertools as it
 
 class FourierFeatureMap(object):
-    def __init__(self, N, use_sin = True):
+    def __init__(self, N):
         # Implicit dividing freqs by two here bc range is -1, 1
-        freqs = np.linspace(-2 * np.pi, 2 * np.pi, N)
-        self.W = np.array(list(it.product(freqs, freqs))).T
-        self.use_sin = use_sin
+        freqs = np.pi * np.arange(N-1,dtype=float)
+        self.W = np.array(list(it.product(freqs[:N // 2 + 1], freqs))).T
 
     def transform(self,P):
         prod = np.dot(P,self.W)
-        feats = np.cos(prod)  # real component
-        if self.use_sin:
-            feats = np.append(feats, np.sin(prod), axis = 1)  # complex component
-        logging.info('states %s x weights %s = features %s',
-                     P.shape, self.W.shape, feats.shape)
+        feats = np.cos(prod)
+        feats = np.append(feats, np.sin(prod), axis = 1) 
         return feats
+    
+    @property
+    def d(self):
+        return self.W.shape[1]*2
 
 
 class TileFeatureMap(object):

@@ -8,19 +8,19 @@ import rsis
 
 logger = rsis.get_logger(__name__)
 
-# add non-scaled loss component output
-# viewing learned reward and value function (vs true)
 # plot train/test loss over time
-
-# l1 and l2 regularization / grid search
-# closed-form coordinate descent?
 # natural gradient
-# use shift to avoid singular matrix inversion?
-
 # LSTD and TD0 baselines
 # solving for true value function
 # performance measure
 # check for sign changes and set to zero
+# thorough hyperparameter search
+# plot distribution through time according to the learned model (v. true model)
+# see if learning is stable if the model is initialized to the true model values
+# calculate TD error on sample set
+# use full feature space (reduces to LSTD-like alg)
+# see if features are effective without using T and q to solve for w
+# regularize when solving for w using P and q
 
 def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
     plt.clf()
@@ -41,15 +41,14 @@ def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
                   #vmax = lim,
                   interpolation = 'nearest')
 
-    #plt.gcf().set_size_inches((n_sp2 / 2., n_sp1 / 2.))
     plt.savefig(file_name)
 
 
-def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 15,
-                       shuffle = False, last = False, use_sin = True):
+def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
+                       shuffle = False, last = False):
     # plot a regular grid
     P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-    fmap = rsis.FourierFeatureMap(N, use_sin)
+    fmap = rsis.FourierFeatureMap(N)
     X = fmap.transform(P)
 
     if shuffle: # shuffle the columns of X
@@ -60,33 +59,17 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 15,
 
 
 
-# thorough hyperparameter search
-# plot distribution through time according to the learned model (v. true model)
-# see if learning is stable if the model is initialized to the true model values
-# calculate TD error on sample set
-# use full feature space (reduces to LSTD-like alg)
-# see if features are effective without using T and q to solve for w
-# regularize when solving for w using P and q
-
-# other features, domains
-
-# alternative ideas:
-# use T^i Z_t+i for i in [1,h] where h is a small integer, can it predict further in time?
-# include TD error in loss
-
 
 def main(
         n = 1000, # number of samples per minibatch
-        N = 20, # grid/basis resolution, num of fourier funcs: d = N/2+1, grid is [2Nx2N]
-        k = 16,  # number of compressed features, Phi is [dxk]
-        h = 1,
+        N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
+        k = 4,  # number of compressed features, Phi is [dxk]
+        h = 10,
         max_iter = 3, # max number of cg optimizer steps per iteration
-        l1 = 1e-4, # applied to Phi
-        l2 = 1e-6, # applied to self.params[1:]
-        offdiag = 2e-1, # applied to offdiag elements of Phi.T * Phi
+        l1 = 2e-3, # applied to Phi
+        l2 = 0., # applied to self.params[1:]
         shift = 1e-12,
         gam = 1-1e-2,
-        dyn_wt = 8e-1,
         lock_phi0 = False, # allow the first column of Phi to change when ascending log prob
         ):
 
@@ -95,7 +78,7 @@ def main(
     os.system('mv plots/*.png plots/old/')
     
     cworld = rsis.CircleWorld(gam = gam)
-    fmap = rsis.FourierFeatureMap(N, use_sin = True)
+    fmap = rsis.FourierFeatureMap(N)
 
     it = 0
 
@@ -118,7 +101,6 @@ def main(
         # plot a regular grid
         logger.info('plotting current features')
         P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-        #P = numpy.reshape(numpy.mgrid[-2:2:2*N*1j,-2:2:2*N*1j], (2,4*N*N)).T
         X = fmap.transform(P)
         Z = model.encode(X)
         l = int(numpy.sqrt(k))
@@ -138,42 +120,27 @@ def main(
         logger.info('q norm: ' + str(numpy.linalg.norm(model.q)))
         logger.info('s: ' + str(model.sr))
 
-        #r, z, n, l = model._loss(X_test, R_test)
-        #logger.info('loss components: r %f z %f norm %f = %f -- reg %f',
-        #            r, z, n, r + z + n, l)
-        r, z, n, l, d = model._loss(X_test, R_test)
-        logger.info('loss components: r %f z %f d %f norm %f = %f -- reg %f',
-                    r, z, d, n, r + z + n + d, l)
-
-        #r, z, n, l = model.unscaled_loss(X_test, R_test)
-        #logger.info('unscaled loss components: r %f z %f norm %f = %f -- reg %f',
-                    #r, z, n, r + z + n, l)
-        r, z, n, l, d = model.unscaled_loss(X_test, R_test)
-        logger.info('unscaled loss components: r %f z %f d %f norm %f = %f -- reg %f',
-                    r, z, d, n, r + z + n + d, l)
         if it % 10 == 0:
-            plot_learned(2*N)
+            plot_learned(N)
 
-    X_test, R_test = sample_circle_world(n)
 
     #view_position_scatterplot(cworld.get_samples(n)[0])
 
-    #model = RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift)
-    #model = rsis.CD_RSIS(X_test.shape[1], k, h, l1=l1, l2=l2, shift=shift)
-    model = rsis.DYN_RSIS(X_test.shape[1], k, h, l1=l1, l2 = l2, dyn_wt=dyn_wt, shift=shift)
-    #model = rsis.AR_RSIS(X_test.shape[1], k, l1 = l1, l2 = l2, shift = shift,
-                        #lock_phi0 = lock_phi0, offdiag = offdiag)
+    X_test, R_test = sample_circle_world(4*n)
 
+    model = rsis.Horizon_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
     try:
         for it in range(100):
             logger.info('*** iteration ' + str(it) + '***')
+            
             X, R = sample_circle_world(n)
-            #model.set_noise_params(X,R)
             
             #logger.info('descending reward loss')
             #model.set_params(
                 #scipy.optimize.fmin_cg(
-                    #model.optimize_rew_loss, model.flat_params, model.optimize_rew_grad,
+                    #model.optimize_smooth_loss, 
+                    #model.flat_params, 
+                    #model.optimize_smooth_grad,
                     #args = (X, R),
                     #full_output = False,
                     #maxiter = max_iter)
@@ -193,20 +160,24 @@ def main(
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
 
-    
+    plot_learned(N)
+
     P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-    #P = numpy.reshape(numpy.mgrid[-2:2:2*N*1j,-2:2:2*N*1j], (2,4*N*N)).T
     X = fmap.transform(P)
     R = cworld.reward_func(P) # true reward function
     V = cworld.value_func(P)
 
-    x_test, r_test = sample_circle_world(4*n)
-    
+    x_test, r_test = sample_circle_world(n)
+    lstd_val = model.lstd_value_func(x_test, r_test, gam, X)
+    learned_val = model.value_func(X, cworld.gam)
+
+
     plot_filters(numpy.vstack([model.reward_func(X), R]).T, (1, 2), file_name='plots/rewards.png')
-    plot_filters(numpy.vstack([model.value_func(X, cworld.gam), V]).T, (1, 2), file_name='plots/values.png')
+    plot_filters(numpy.vstack([learned_val, lstd_val, V]).T, (1, 3), file_name='plots/values.png')
 
     logger.info('final q: ' + str(model.q))
     logger.info('final w: ' + str(model.w))
 
 if __name__ == '__main__':
     rsis.script(main)
+    #view_fourier_basis()

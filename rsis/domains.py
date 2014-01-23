@@ -7,7 +7,7 @@ class CircleWorld(object):
     circle and rewards. The rewards and transitions (rotations) are linear in
     the position z with gaussian noise.  """
 
-    def __init__(self, theta = np.pi/np.e**np.pi, eps_z = 1e-2, eps_th = 1e-3, eps_r = 1e-6):
+    def __init__(self, theta = np.pi/np.e**np.pi, gam = 1-1e-2, eps_z = 1e-2, eps_th = 1e-3, eps_r = 1e-6):
         self.z = self.init_z
         self.q = np.array([1,1])
         self.theta = theta # roatation angle mean/bias
@@ -18,7 +18,7 @@ class CircleWorld(object):
         self.eps_th = eps_th
         self.eps_r = eps_r
 
-        self.w = np.linalg.solve(np.identity(self.T.shape[0]) - self.gam * self.T, self.q)
+        self.w = np.linalg.solve(np.identity(self.T.shape[0]) - self.gam * self.T.T, self.q)
     
     @staticmethod
     def _rotation(theta):
@@ -27,7 +27,7 @@ class CircleWorld(object):
     
     @property
     def init_z(self):
-        z = np.standard_normal(2) # random initial position w/ unit norm
+        z = np.random.standard_normal(2) # random initial position w/ unit norm
         z /= 2*np.linalg.norm(z)
         return z
 
