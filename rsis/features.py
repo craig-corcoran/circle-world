@@ -21,12 +21,14 @@ class FourierFeatureMap(object):
 
 class TileFeatureMap(object):
     def __init__(self, N, size = 1.):
-        W = []
-        for s in size * rng.uniform(0.1, 0.9, size=N):
-            x = rng.uniform(-size, size - s)
-            y = rng.uniform(-size, size - s)
-            W.append([x, y, x + s, y + s])
-        self.X1, self.Y1, self.X2, self.Y2 = np.array(W).T
+        s = size * np.exp(rng.uniform(-3, -0.5, size=N))
+        s.sort()
+        cx = rng.uniform(-size, size, size=N)
+        cy = rng.uniform(-size, size, size=N)
+        self.X1 = cx - s
+        self.Y1 = cy - s
+        self.X2 = cx + s
+        self.Y2 = cy + s
 
     def transform(self, P):
         return np.array([
