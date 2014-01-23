@@ -146,12 +146,12 @@ class BASE(object):
         return TT.dot(x, self.Phi_t)
 
     def regularization(self):
-        reg = self.l1 * numpy.sum(abs(self.Phi))
+        reg = self.l1 * numpy.sum(self.Phi**2) # numpy.sum(abs(self.Phi))
         reg += self.l2 * sum(numpy.sum(p**2) for p in self.params[1:])
         return reg
 
     def _regularization_t(self):
-        reg = self.l1 * TT.sum(abs(self.Phi_t))
+        reg = self.l1 * TT.sum(self.Phi_t**2) # TT.sum(abs(self.Phi_t))
         reg += self.l2 * sum(TT.sum(p * p) for p in self.theano_params[1:])
         return reg
     

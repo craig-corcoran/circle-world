@@ -32,3 +32,9 @@ class TileFeatureMap(object):
         return np.array([
             (self.X1 <= x) & (x <= self.X2) & (self.Y1 <= y) & (y <= self.Y2)
             for x, y in P], int)
+
+    @property
+    def d(self):
+        return self.X1.shape[0]
+
+
