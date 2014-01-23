@@ -11,7 +11,7 @@ class CircleWorld(object):
         self.z = self.init_z
         self.q = np.array([1,1])
         self.theta = theta # roatation angle mean/bias
-        self.T = self._rotation(self.theta)  # expected transition/rotation matrix 
+        self.T = CircleWorld.rotation(self.theta)  # expected transition/rotation matrix 
         self.gam = gam
 
         self.eps_z = eps_z
@@ -21,13 +21,13 @@ class CircleWorld(object):
         self.w = np.linalg.solve(np.identity(self.T.shape[0]) - self.gam * self.T.T, self.q)
     
     @staticmethod
-    def _rotation(theta):
+    def rotation(theta):
         return  np.array([[np.cos(theta), -np.sin(theta)],
                               [np.sin(theta), np.cos(theta)]])
     
     @property
     def init_z(self):
-        z = np.random.standard_normal(2) # random initial position w/ unit norm
+        z = rng.randn(2) # random initial position w/ unit norm
         z /= 2*np.linalg.norm(z)
         return z
 
@@ -47,35 +47,35 @@ class CircleWorld(object):
         states = np.empty((n, 2))
         rewards = np.empty(n)
         for i in xrange(n):
-            T = self._rotation(self.theta + self.eps_th*np.random.standard_normal())
+            T = CircleWorld.rotation(self.theta + self.eps_th*rng.randn())
             self.z = np.dot(T, self.z) 
-            self.z += self.eps_z*np.random.standard_normal()*np.linalg.norm(self.z)*self.z
+            self.z += self.eps_z*rng.randn()*np.linalg.norm(self.z)*self.z
     
             # the state can't leave the unit circle
             if np.sum(self.z**2) > 1: 
                 self.z /= np.linalg.norm(self.z)
 
             states[i] = self.z
-            rewards[i] = np.dot(self.q, self.z) + self.eps_r*np.random.standard_normal()
+            rewards[i] = np.dot(self.q, self.z) + self.eps_r*rng.randn()
 
         return states, rewards
 
 
 class TorusWorld(object):
 
-    def __init__(self, reward = 0.1, eps_z = 1e-2, eps_t = 1e-1):
+    def __init__(self, reward = 0.1, eps_z = 0.05, eps_R = 0., eps_T = 0.02):
         self.reward = reward
         self.eps_z = eps_z
-        self.eps_t = eps_t
+        self.R = np.eye(2) + eps_R * rng.randn(2, 2)
+        self.T = eps_T * (np.ones(2) + 0.1 * rng.randn(2))
 
     def get_samples(self, n):
         q = np.zeros(2)
-        z = (1 + rng.randn(2)) % 2 - 1
-        T = self.eps_t * rng.randn(2, 2) + CircleWorld.rotation(0.2)
+        z = (rng.randn(2) + 1) % 2 - 1
         states = np.empty((n, 2))
         rewards = np.empty(n)
         for i in xrange(n):
-            z = (1 + np.dot(T, z) + self.eps_z * rng.randn(2)) % 2 - 1
+            z = (self.eps_z * rng.randn(2) + np.dot(self.R, z + self.T) + 1) % 2 - 1
             states[i] = z
             rewards[i] = int(np.linalg.norm(z - q) < self.reward)
         return states, rewards
