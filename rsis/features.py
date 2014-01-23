@@ -19,9 +19,9 @@ class FourierFeatureMap(object):
 
 
 class TileFeatureMap(object):
-    def __init__(self, depth = 3):
+    def __init__(self, depth = 3, size = 1.):
         W = []
-        active = [[-1., -1., 1., 1.]]
+        active = [[-size, -size, size, size]]
         for _ in range(depth):
             new = []
             for x1, y1, x2, y2 in active:
@@ -37,6 +37,5 @@ class TileFeatureMap(object):
 
     def transform(self, P):
         return np.array([
-            (self.X1 <= x) & (x <= self.X2) &
-            (self.Y1 <= y) & (y <= self.Y2)
+            (self.X1 <= x) & (x < self.X2) & (self.Y1 <= y) & (y < self.Y2)
             for x, y in P], int)

@@ -63,7 +63,8 @@ class CircleWorld(object):
 
 class TorusWorld(object):
 
-    def __init__(self, eps_z = 1e-2, eps_t = 1e-1):
+    def __init__(self, reward = 0.1, eps_z = 1e-2, eps_t = 1e-1):
+        self.reward = reward
         self.eps_z = eps_z
         self.eps_t = eps_t
 
@@ -76,5 +77,5 @@ class TorusWorld(object):
         for i in xrange(n):
             z = (1 + np.dot(T, z) + self.eps_z * rng.randn(2)) % 2 - 1
             states[i] = z
-            rewards[i] = 1 - np.linalg.norm(z - q)
+            rewards[i] = int(np.linalg.norm(z - q) < self.reward)
         return states, rewards
