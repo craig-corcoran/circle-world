@@ -21,5 +21,5 @@ def plot_samples(sub, world, n=100):
 
 if __name__ == '__main__':
     plot_samples(121, rsis.CircleWorld())
-    plot_samples(122, rsis.TorusWorld(eps_z=0))
+    plot_samples(122, rsis.TorusWorld(eps_z=0), 300)
     plt.show()

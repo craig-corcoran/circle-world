@@ -29,4 +29,4 @@ def plot_features(fmap, size, rows, cols):
 
 if __name__ == '__main__':
     plot_features(rsis.FourierFeatureMap(9, True), 9, 18, 9)
-    plot_features(rsis.TileFeatureMap(3), 20, 7, 12)
+    plot_features(rsis.TileFeatureMap(162), 20, 9, 18)
