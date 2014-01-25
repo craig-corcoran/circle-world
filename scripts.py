@@ -60,10 +60,10 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
 
 def main(
         batches = 100, # number of iterations to run cg for
-        n = 100, # number of samples per minibatch
+        n = 500, # number of samples per minibatch
         N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
         k = 16,  # number of compressed features, Phi is [dxk]
-        h = None, # horizon for reward loss
+        h = 20, # horizon for reward loss
         max_iter = 3, # max number of cg optimizer steps per iteration
         l1 = 2e-3, # applied to Phi
         l2 = 1e-6, # applied to params[1:]
@@ -79,6 +79,7 @@ def main(
     #os.system('rm plots/*.png')
     os.system('mv plots/*.png plots/old/')
     
+    logger.info('constructing world and feature map')
     #world = rsis.CircleWorld(gam = gam)
     world = rsis.TorusWorld()
     #fmap = rsis.FourierFeatureMap(N)
@@ -113,47 +114,75 @@ def main(
         tup = (l,l) if k > 2 else (1,k)
         plot_filters(Z, tup, 'plots/learned_basis_%05d.png' % it)
 
+    def evaluate(x_test = None, r_test = None):
+        if x_test is None:
+            x_test, r_test = sample_circle_world(4*n)
+
+        lstd_w = numpy.linalg.solve(C + shift * numpy.identity(fmap.d), b)
+        model_val = model.value_func(x_test, gam)
+        lstd_val = numpy.dot(x_test, lstd_w)
+
+        model_err = td_error(model_val, r_test)
+        lstd_err = td_error(lstd_val, r_test)
+
+        logger.info('sample model error: %s' % str(model_err))
+        logger.info('sample lstd error: %s' % str(lstd_err))
+
+
+    def td_error(v, r):
+        return numpy.sum((r[:-1] + gam * v[1:] - v[:-1])**2)
+
+
     def log():
         logger.info('train loss: %.5f', model.loss(X, R))
         logger.info('test loss: %.5f', model.loss(X_test, R_test))
+        evaluate(X_test, R_test)
 
         phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
-        S_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Sz)
         T_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.T)
-        logger.info('Phi column norms: ' + str(phi_norms))
-        logger.info('Sz column norms: ' + str(S_norms))
-        logger.info('T column norms: ' + str(T_norms))
+        #S_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Sz)
+
+        logger.info('average Phi column norm: ' + str(numpy.average(phi_norms)))
+        logger.info('average T column norms: ' + str(numpy.average(T_norms)))
         logger.info('q norm: ' + str(numpy.linalg.norm(model.q)))
-        logger.info('s: ' + str(model.sr))
+        #logger.info('Sz column norms: ' + str(S_norms))
+        #logger.info('s: ' + str(model.sr))
 
         if it % 10 == 0:
             plot_learned(N)
 
 
     #view_position_scatterplot(world.get_samples(n)[0])
-
-    X_test, R_test = sample_circle_world(4*n)
-
+    logger.info('constructing theano model')
     model = rsis.Horizon_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
     
-    losses = collections.OrderedDict([('rew_horizon', (model.optimize_loss, model.optimize_grad)),
-                             ('smooth', (model.optimize_smooth_loss, model.optimize_smooth_grad))])
+    losses = collections.OrderedDict(
+                    [
+                    ('smooth', (model.optimize_smooth_loss, model.optimize_smooth_grad)),
+                    ('rew_horizon', (model.optimize_loss, model.optimize_grad)),
+                    ])
+    
+    X_test, R_test = sample_circle_world(4*n)
+    C = numpy.zeros((fmap.d, fmap.d))
+    b = numpy.zeros(fmap.d)
     try:
         for it in range(batches):
             logger.info('*** iteration ' + str(it) + '***')
             
             X, R = sample_circle_world(n)
+            C += numpy.dot(X[:-1].T, X[:-1]-gam*X[1:])
+            b += numpy.dot(X[:-1].T, R[:-1])
 
-            for k, val in losses.items():
+            for key, val in losses.items():
                 
                 opt_loss, opt_grad = val
 
-                logger.info('descending %s loss' % k)
+                logger.info('descending %s loss' % key)
                 model.set_params(
                     scipy.optimize.fmin_cg(
-                        model.opt_loss,
+                        opt_loss,
                         model.flat_params,
-                        model.opt_grad,
+                        opt_grad,
                         args=(X, R),
                         full_output=False,
                         maxiter=max_iter)
@@ -163,20 +192,29 @@ def main(
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
 
+    def plot_value_rew():
+        
+        P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
+        X = fmap.transform(P)
+        R = world.reward_func(P) # true reward function
+        
+        lstd_w = numpy.linalg.solve(C, b) 
+        lstd_val = numpy.dot(X, lstd_w)
+        model_val = model.value_func(X, gam)
+        x, r = sample_circle_world(4*n)
+        model_lstd_val = model.lstd_value_func(x, r, gam, X)
+        model_rew = model.reward_func(X)
+
+        value_list = [model_val, model_lstd_val, lstd_val]
+        if hasattr(world, 'value_func'):
+            value_list.append(world.value_func(P))
+
+        plot_filters(numpy.vstack([model_rew, R]).T, (1, 2), file_name='plots/rewards.png')
+        plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values.png')
+
     plot_learned(N)
-
-    P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-    X = fmap.transform(P)
-    R = world.reward_func(P) # true reward function
-    V = world.value_func(P)
-
-    x_test, r_test = sample_circle_world(n)
-    lstd_val = model.lstd_value_func(x_test, r_test, gam, X)
-    learned_val = model.value_func(X, world.gam)
-
-
-    plot_filters(numpy.vstack([model.reward_func(X), R]).T, (1, 2), file_name='plots/rewards.png')
-    plot_filters(numpy.vstack([learned_val, lstd_val, V]).T, (1, 3), file_name='plots/values.png')
+    evaluate(X_test, R_test)
+    plot_value_rew()    
 
     logger.info('final q: ' + str(model.q))
     logger.info('final w: ' + str(model.w))

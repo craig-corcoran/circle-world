@@ -3,6 +3,8 @@ import theano
 import theano.tensor as TT
 import theano.sandbox.linalg.ops as LA
 
+theano.config.warn.subtensor_merge_bug = False
+
 class BASE(object):
     ''' base model class which defines the central model variables and
     optimization infrastructure, but leaves the theano loss variables _loss_t
@@ -192,17 +194,20 @@ class Horizon_RSIS(BASE):
 
     def _loss_t(self):
         
+        self.Tpows_t, _ = theano.scan(
+                            fn=lambda prior_result, T: TT.dot(prior_result, T),
+                            outputs_info=TT.identity_like(self.T_t),
+                            non_sequences=self.T_t,
+                            n_steps=self.h)
         rerr = 0.
         ntot = 0.
-        A = TT.identity_like(self.T_t)
         for i in xrange(self.h+1):
 
             z = self.Z_t if i is 0 else self.Z_t[:-i]
             r = self.R_t if i is 0 else self.R_t[i:]
-            rerr += TT.sum((self._reward_t(TT.dot(z, A)) - r)**2)
+            z_pred = z if i is 0 else TT.dot(z, self.Tpows_t[i-1])
+            rerr += TT.sum((self._reward_t(z_pred) - r)**2)
             ntot += r.shape[0]
-
-            A = TT.dot(A, self.T_t)
 
         return rerr / ntot + self._regularization_t()
 

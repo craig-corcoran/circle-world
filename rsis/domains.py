@@ -68,14 +68,21 @@ class TorusWorld(object):
         self.eps_z = eps_z
         self.R = np.eye(2) + eps_R * rng.randn(2, 2)
         self.T = eps_T * (np.ones(2) + 0.1 * rng.randn(2))
+        self.g = np.zeros(2)
+
+    def _reward(self, p):
+        return int(np.linalg.norm(p - self.g) < self.reward)
+
+    def reward_func(self, x):
+        return np.array([self._reward(x[i]) for i in xrange(x.shape[0])])
 
     def get_samples(self, n):
-        q = np.zeros(2)
         z = (rng.randn(2) + 1) % 2 - 1
         states = np.empty((n, 2))
         rewards = np.empty(n)
         for i in xrange(n):
             z = (self.eps_z * rng.randn(2) + np.dot(self.R, z + self.T) + 1) % 2 - 1
             states[i] = z
-            rewards[i] = int(np.linalg.norm(z - q) < self.reward)
+            rewards[i] = self._reward(z)
+
         return states, rewards
