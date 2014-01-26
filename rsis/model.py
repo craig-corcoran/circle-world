@@ -192,7 +192,8 @@ class Horizon_RSIS(BASE):
         rerr_grad_t = theano.grad(err_t, self.theano_params, disconnected_inputs='ignore')
         self.smooth_grad = theano.function(self.theano_vars, rerr_grad_t, on_unused_input='ignore')
 
-    def _loss_t(self):
+    def scan_loss_t(self):
+        ''' seems to be just as fast, but takes longer to compile'''
         
         self.Tpows_t, _ = theano.scan(
                             fn=lambda prior_result, T: TT.dot(prior_result, T),
@@ -211,6 +212,21 @@ class Horizon_RSIS(BASE):
 
         return rerr / ntot + self._regularization_t()
 
+    def _loss_t(self):
+        rerr = 0.
+        ntot = 0.
+        A = TT.identity_like(self.T_t)
+        for i in xrange(self.h+1):
+
+            z = self.Z_t if i is 0 else self.Z_t[:-i]
+            r = self.R_t if i is 0 else self.R_t[i:]
+            rerr += TT.sum((self._reward_t(TT.dot(z, A)) - r)**2)
+            ntot += r.shape[0]
+
+            A = TT.dot(A, self.T_t)
+
+        return rerr / ntot + self._regularization_t()
+        
     @property
     def theano_params(self):
         return [self.Phi_t, self.T_t, self.q_t]

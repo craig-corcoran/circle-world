@@ -1,4 +1,5 @@
 import os
+import time
 import copy
 import collections
 import numpy 
@@ -59,7 +60,7 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
 
 
 def main(
-        batches = 100, # number of iterations to run cg for
+        batches = 50, # number of iterations to run cg for
         n = 500, # number of samples per minibatch
         N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
         k = 16,  # number of compressed features, Phi is [dxk]
@@ -80,8 +81,8 @@ def main(
     os.system('mv plots/*.png plots/old/')
     
     logger.info('constructing world and feature map')
-    #world = rsis.CircleWorld(gam = gam)
-    world = rsis.TorusWorld()
+    world = rsis.CircleWorld(gam = gam)
+    #world = rsis.TorusWorld()
     #fmap = rsis.FourierFeatureMap(N)
     fmap = rsis.TileFeatureMap(N**2)
 
@@ -154,14 +155,17 @@ def main(
 
         if it % 10 == 0:
             plot_learned(N)
-
-    #view_position_scatterplot(world.get_samples(n)[0])
+    
     logger.info('constructing theano model')
+
+    
+    t = time.time()
     model = rsis.Horizon_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
+    logger.info('time to compile model: ' + str(t - time.time())
     
     losses = collections.OrderedDict(
                     [
-                    ('smooth', (model.optimize_smooth_loss, model.optimize_smooth_grad)),
+                    #('smooth', (model.optimize_smooth_loss, model.optimize_smooth_grad)),
                     ('rew_horizon', (model.optimize_loss, model.optimize_grad)),
                     ])
     
@@ -181,6 +185,8 @@ def main(
                 opt_loss, opt_grad = val
 
                 logger.info('descending %s loss' % key)
+
+                t = time.time()
                 model.set_params(
                     scipy.optimize.fmin_cg(
                         opt_loss,
@@ -190,6 +196,7 @@ def main(
                         full_output=False,
                         maxiter=max_iter)
                 )
+                logger.info('time for cg iteration: ', t - time.time())
                 log()
 
     except KeyboardInterrupt:
@@ -201,7 +208,7 @@ def main(
         X = fmap.transform(P)
         R = world.reward_func(P) # true reward function
         
-        lstd_w = numpy.linalg.solve(C, b) 
+        lstd_w = numpy.linalg.solve(C + shift * numpy.identity(fmap.d), b) 
         lstd_val = numpy.dot(X, lstd_w)
         model_val = model.value_func(X, gam)
         x, r = sample_circle_world(4*n)
