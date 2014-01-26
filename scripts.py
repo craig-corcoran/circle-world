@@ -129,9 +129,13 @@ def main(
         logger.info('sample lstd error: %s' % str(lstd_err))
 
 
-    def td_error(v, r):
-        return numpy.sum((r[:-1] + gam * v[1:] - v[:-1])**2)
-
+    def td_error(v, r, all_steps = True):
+        ntot = 0
+        los = 0.
+        for i in xrange(1, r.shape[0] if all_steps else 2):
+            los += numpy.sum((r[:-i] + gam * v[i:] - v[:-i])**2) 
+            ntot += r[:-i].shape[0]
+        return los / ntot
 
     def log():
         logger.info('train loss: %.5f', model.loss(X, R))
@@ -150,7 +154,6 @@ def main(
 
         if it % 10 == 0:
             plot_learned(N)
-
 
     #view_position_scatterplot(world.get_samples(n)[0])
     logger.info('constructing theano model')
@@ -213,8 +216,8 @@ def main(
         plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values.png')
 
     plot_learned(N)
-    evaluate(X_test, R_test)
     plot_value_rew()    
+    evaluate(X_test, R_test)
 
     logger.info('final q: ' + str(model.q))
     logger.info('final w: ' + str(model.w))
