@@ -56,39 +56,48 @@ class BASE(object):
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
         self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
         self.Sz_inv_t = LA.matrix_inverse(self.Sz_t + self.inv_shift_t)
-
-        self.param_names = [x.name for x in self.theano_params]
+        
+        # create a dictionary of 'name' : (var, theano_var) items
+        #self.variables = dict(zip([x.name for x in self.all_params_t], zip(self.all_vars, self.all_vars_t)))
+        self.params = self.all_params
+        self.params_t = self.all_params_t
     
-        # compute theano loss function 
-        loss_t = self._loss_t() 
-        self.theano_loss = theano.function(self.theano_vars, loss_t, on_unused_input='ignore')
-
-        grad = theano.grad(loss_t, self.theano_params) # , disconnected_inputs='ignore'
-        self.theano_grad = theano.function(self.theano_vars, grad, on_unused_input='ignore')
+    def set_wrt(self, params, params_t):
+        self.params = params
+        self.params_t = params_t
 
     @property
-    def theano_vars(self):
+    def all_vars_t(self):
         return [self.Phi_t, self.T_t, self.q_t, self.Sz_t, self.sr_t, self.X_t, self.R_t]
-
-    @property
-    def theano_params(self):
-        return [self.Phi_t, self.T_t, self.q_t, self.Sz_t, self.sr_t] 
     
     @property
-    def params(self):
+    def all_vars(self):
         return [self.Phi, self.T, self.q, self.Sz, self.sr]
 
     @property
-    def args(self):
-        return []
+    def all_params_t(self):
+        return [self.Phi_t, self.T_t, self.q_t] 
+    
+    @property
+    def all_params(self):
+        return [self.Phi, self.T, self.q]
 
     @property
-    def flat_params(self):
-        return self._flatten(self.params)
+    def _args(self):
+        return [self.Sz, self.sr]
+
+    @property
+    def flat_params(self, params=None):
+        p = params if params else self.params
+        return self._flatten(p)
     
     @property
     def shapes(self):
         return map(numpy.shape, self.params)
+
+    @property
+    def param_names(self):
+        return [x.name for x in self.params_t]
 
     @staticmethod
     def _flatten(params):
@@ -154,29 +163,50 @@ class BASE(object):
 
     def _regularization_t(self):
         reg = self.l1 * TT.sum(self.Phi_t**2) # TT.sum(abs(self.Phi_t))
-        reg += self.l2 * sum(TT.sum(p * p) for p in self.theano_params[1:])
+        reg += self.l2 * sum(TT.sum(p * p) for p in self.params_t[1:])
         return reg
+
+    def _reward_error_t(self):
+        return TT.sum((self.R_t - self._reward_t(self.Z_t))**2)/self.sr_t**2
+
+    def reward_error(self, X, R):
+        # alternatively call theano function reward_loss(
+        return numpy.sum((R - self._reward(self.encode(X)))**2)/self.sr**2
+
+    def _transition_error_t(self):
+        zerr_v = self.Z_t[1:] - self._transition_t(self.Z_t[:-1])
+        zerr_vp = TT.dot(zerr_v, self.Sz_inv_t)
+        return TT.sum(TT.mul(zerr_v, zerr_vp))
+
+    def transition_error(self, X):
+        zerr_v =  self.encode(X[1:]) - self.transition(self.encode(X[:-1]))
+        zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz))
+        return numpy.sum(numpy.multiply(zerr_v, zerr_vp))
     
     def loss(self, X, R):
         ''' callable, takes array of features X and rewards R and returns the
         loss given the current set of parameters. Examples through time are
         indexed by row '''
 
-        return self.theano_loss(*(self.params + self.args + [X, R]))
+        return self.theano_loss(*[self.Phi, self.T, self.q, self.Sz, self.sr, X, R])
 
     def grad(self, X, R):
         ''' returns gradient at the current parameters with the given inputs X
         and R. '''
 
-        return self.theano_loss(*(self.params + self.args + [X, R]))
+        return self.theano_grad(*[self.Phi, self.T, self.q, self.Sz, self.sr, X, R])
+
+    def get_args(self, params, X, R):
+        params = params if (type(params) == list) else self._unpack_params(params)        
+        return params + self._args + [X, R]
 
     def optimize_loss(self, params, X, R):
-        unpacked = self._unpack_params(params)
-        return self.theano_loss(*(unpacked + self.args + [X, R]))
+        self.params, self.params_t = self.all_params, self.all_params_t
+        return self.theano_loss(*self.get_args(params, X, R))
 
     def optimize_grad(self, params, X, R):
-        unpacked = self._unpack_params(params)
-        grad = self.theano_grad(*(unpacked + self.args + [X, R]))
+        self.params, self.params_t = self.all_params, self.all_params_t
+        grad = self.theano_grad(*self.get_args(params, X, R))
         return self._flatten(grad)
 
 
@@ -184,14 +214,52 @@ class BASE(object):
 class Horizon_RSIS(BASE):
 
     def __init__(self, *args, **kwargs):
-        super(Horizon_RSIS, self).__init__(*args, **kwargs)
+        super(Horizon_RSIS, self).__init__(*args, **kwargs) 
 
-        err_t = self._smooth_loss() 
-        self.smooth_loss = theano.function(self.theano_vars, err_t, on_unused_input='ignore')
+        # compute theano horizon loss function 
+        loss_t = self._loss_t() 
+        self.theano_loss = theano.function(self.all_vars_t, loss_t, on_unused_input='ignore')
 
-        rerr_grad_t = theano.grad(err_t, self.theano_params, disconnected_inputs='ignore')
-        self.smooth_grad = theano.function(self.theano_vars, rerr_grad_t, on_unused_input='ignore')
+        grad = theano.grad(loss_t, self.all_params_t) # , disconnected_inputs='ignore'
+        self.theano_grad = theano.function(self.all_vars_t, grad, on_unused_input='ignore')
+        
+        # and model loss with static Phi
+        model_err_t = self._model_loss_t() 
+        self.model_loss = theano.function(self.all_vars_t, model_err_t, on_unused_input='ignore')
 
+        model_grad_t = theano.grad(model_err_t, self.model_params_t, disconnected_inputs='ignore')
+        self.model_grad = theano.function(self.all_vars_t, model_grad_t, on_unused_input='ignore')
+
+        ## compute reward and transition loss
+        #rerr_t = self._reward_error_t() 
+        #self.reward_loss = theano.function(self.all_vars_t, rerr_t, on_unused_input='ignore')
+
+        #rerr_grad_t = theano.grad(rerr_t, self.params_t, disconnected_inputs='ignore')
+        #self.reward_grad = theano.function(self.all_vars_t, rerr_grad_t, on_unused_input='ignore')
+
+        #zerr_t = self._transition_error_t() 
+        #self.transiton_loss = theano.function(self.all_vars_t, zerr_t, on_unused_input='ignore')
+
+        #zerr_grad_t = theano.grad(zerr_t, self.params_t, disconnected_inputs='ignore')
+        #self.transition_grad = theano.function(self.all_vars_t, zerr_grad_t, on_unused_input='ignore')
+    
+    @property
+    def model_params_t(self):
+        #return [self.T_t, self.q_t]
+        return self.all_params_t
+
+    @property
+    def model_params(self):
+        ''' subset of parameters concerned with learning the model in z-space
+        given a feature mapping defined by Phi '''
+        #return [self.T, self.q]
+        return self.all_params
+
+    @property
+    def _model_args(self):
+        return [self.Sz, self.sr]
+
+  
     def scan_loss_t(self):
         ''' seems to be just as fast, but takes longer to compile'''
         
@@ -226,43 +294,21 @@ class Horizon_RSIS(BASE):
             A = TT.dot(A, self.T_t)
 
         return rerr / ntot + self._regularization_t()
-        
-    @property
-    def theano_params(self):
-        return [self.Phi_t, self.T_t, self.q_t]
-    
-    @property
-    def params(self):
-        return [self.Phi, self.T, self.q]
 
-    @property
-    def args(self):
-        return [self.Sz, self.sr]
+    def get_model_args(self, params, X, R):
+        params = params if (type(params) == list) else self._unpack_params(params)
+        return params + self._model_args + [X, R]
+        #return [self.Phi] + params + self._model_args + [X, R]
+  
+    def _model_loss_t(self):
+        return (self._reward_error_t() + self._transition_error_t()) / self.n_t + self._regularization_t()
 
-    def _reward_error_t(self):
-        return TT.sum((self.R_t - self._reward_t(self.Z_t))**2)/self.sr_t**2
+    def optimize_model_loss(self, params, X, R):
+        self.params, self.params_t = self.model_params, self.model_params_t # sets params so they are unpacked correctly
+        return self.model_loss(*self.get_model_args(params, X, R))
 
-    def _transition_error_t(self):
-        zerr_v = self.Z_t[1:] - self._transition_t(self.Z_t[:-1])
-        zerr_vp = TT.dot(zerr_v, self.Sz_inv_t)
-        return TT.sum(TT.mul(zerr_v, zerr_vp))
-
-    def _smooth_loss(self):
-        return self._reward_error_t() + self._transition_error_t() 
-
-    def optimize_smooth_loss(self, params, X, R):
-        unpacked = self._unpack_params(params)
-        return self.smooth_loss(*(unpacked + self.args + [X, R]))
-
-    def optimize_smooth_grad(self, params, X, R):
-        unpacked = self._unpack_params(params)
-        grad = self.smooth_grad(*(unpacked + self.args + [X, R]))
+    def optimize_model_grad(self, params, X, R):
+        self.params, self.params_t = self.model_params, self.model_params_t
+        grad = self.model_grad(*self.get_model_args(params, X, R))
         return self._flatten(grad)
-
-
-        
-
-
-
-    
 

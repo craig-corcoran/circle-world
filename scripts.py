@@ -1,8 +1,10 @@
 import os
 import time
+import datetime
 import copy
 import collections
 import numpy 
+import pandas
 import scipy.optimize
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -81,8 +83,8 @@ def main(
     os.system('mv plots/*.png plots/old/')
     
     logger.info('constructing world and feature map')
-    world = rsis.CircleWorld(gam = gam)
-    #world = rsis.TorusWorld()
+    #world = rsis.CircleWorld(gam = gam)
+    world = rsis.TorusWorld()
     #fmap = rsis.FourierFeatureMap(N)
     fmap = rsis.TileFeatureMap(N**2)
 
@@ -113,7 +115,7 @@ def main(
         Z = model.encode(X)
         l = int(numpy.sqrt(k))
         tup = (l,l) if k > 2 else (1,k)
-        plot_filters(Z, tup, 'plots/learned_basis_%05d.png' % it)
+        plot_filters(Z, tup, 'plots/learned_basis_%s.%05d.png' % (key, it))
 
     def evaluate(x_test = None, r_test = None):
         if x_test is None:
@@ -124,11 +126,19 @@ def main(
         lstd_val = numpy.dot(x_test, lstd_w)
 
         model_err = td_error(model_val, r_test)
+        model_rerr = model.reward_error(x_test, r_test)
+        model_zerr = model.transition_error(x_test)
         lstd_err = td_error(lstd_val, r_test)
 
-        logger.info('sample model error: %s' % str(model_err))
         logger.info('sample lstd error: %s' % str(lstd_err))
+        logger.info('sample model error: %s' % str(model_err))
+        logger.info('sample reward error: %s' % str(model_rerr))
+        logger.info('sample transition error: %s' % str(model_zerr))
 
+        return {'td-error': model_err, 
+                'reward-error':model_rerr, 
+                'transition-error': model_zerr, 
+                'lstd-error': lstd_err}
 
     def td_error(v, r, all_steps = True):
         ntot = 0
@@ -141,8 +151,7 @@ def main(
     def log():
         logger.info('train loss: %.5f', model.loss(X, R))
         logger.info('test loss: %.5f', model.loss(X_test, R_test))
-        evaluate(X_test, R_test)
-
+        
         phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
         T_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.T)
         #S_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Sz)
@@ -152,26 +161,26 @@ def main(
         logger.info('q norm: ' + str(numpy.linalg.norm(model.q)))
         #logger.info('Sz column norms: ' + str(S_norms))
         #logger.info('s: ' + str(model.sr))
-
+        
         if it % 10 == 0:
             plot_learned(N)
     
     logger.info('constructing theano model')
-
     
     t = time.time()
     model = rsis.Horizon_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
-    logger.info('time to compile model: ' + str(t - time.time())
+    logger.info('time to compile model: ' + str(time.time() - t))
     
     losses = collections.OrderedDict(
                     [
-                    #('smooth', (model.optimize_smooth_loss, model.optimize_smooth_grad)),
-                    ('rew_horizon', (model.optimize_loss, model.optimize_grad)),
+                    ('horizon', (model.optimize_loss, model.optimize_grad, model.all_params, model.all_params_t)),
+                    ('model', (model.optimize_model_loss, model.optimize_model_grad, model.model_params, model.model_params_t)),
                     ])
     
     X_test, R_test = sample_circle_world(4*n)
     C = numpy.zeros((fmap.d, fmap.d))
     b = numpy.zeros(fmap.d)
+    loss_values = []
     try:
         for it in range(batches):
             logger.info('*** iteration ' + str(it) + '***')
@@ -182,9 +191,12 @@ def main(
 
             for key, val in losses.items():
                 
-                opt_loss, opt_grad = val
+                opt_loss, opt_grad, wrt, wrt_t = val
+
 
                 logger.info('descending %s loss' % key)
+
+                model.set_wrt(wrt, wrt_t)
 
                 t = time.time()
                 model.set_params(
@@ -196,11 +208,36 @@ def main(
                         full_output=False,
                         maxiter=max_iter)
                 )
-                logger.info('time for cg iteration: ', t - time.time())
+                logger.info('time for cg iteration: %f' % (time.time()-t))
+                
                 log()
+
+                loss_values.append(evaluate(X_test, R_test))
 
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
+    
+    timestamp = str(datetime.datetime.now()).replace(' ','.').replace(':','.')
+
+    logger.info('final q: ' + str(model.q))
+    logger.info('final w: ' + str(model.w))
+    plot_learned(N)
+
+    df = pandas.DataFrame(loss_values)
+    df.to_csv('data/losses%s.csv' % timestamp)
+    
+    def plot_loss_curve():
+        
+        plt.clf()
+        for c in df.columns:
+            
+            y = df[c].values
+            plt.plot(numpy.arange(1,len(y)+1), y, label = c)
+            plt.ylim([0,80])
+
+        plt.legend()
+        plt.savefig('plots/loss-curve%s.png' % timestamp)
+
 
     def plot_value_rew():
         
@@ -219,15 +256,12 @@ def main(
         if hasattr(world, 'value_func'):
             value_list.append(world.value_func(P))
 
-        plot_filters(numpy.vstack([model_rew, R]).T, (1, 2), file_name='plots/rewards.png')
-        plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values.png')
+        plot_filters(numpy.vstack([model_rew, R]).T, (1, 2), file_name='plots/rewards%s.png' % timestamp)
+        plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values%s.png' % timestamp)
 
-    plot_learned(N)
     plot_value_rew()    
-    evaluate(X_test, R_test)
+    plot_loss_curve()
 
-    logger.info('final q: ' + str(model.q))
-    logger.info('final w: ' + str(model.w))
 
 if __name__ == '__main__':
     rsis.script(main)
