@@ -52,6 +52,7 @@ class BASE(object):
         self.X_t = TT.dmatrix('X')
         self.R_t = TT.dvector('R')
         
+        self.ev_t, self.U_t = LA.eig(self.T_t)
         self.n_t = TT.sum(TT.ones_like(self.R_t))
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
         self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
@@ -61,6 +62,16 @@ class BASE(object):
         #self.variables = dict(zip([x.name for x in self.all_params_t], zip(self.all_vars, self.all_vars_t)))
         self.params = self.all_params
         self.params_t = self.all_params_t
+
+    
+    def compile_theano_funcs(self): 
+        
+        # compute theano horizon loss function 
+        loss_t = self._loss_t() 
+        self.theano_loss = theano.function(self.all_vars_t, loss_t, on_unused_input='ignore')
+
+        grad = theano.grad(loss_t, self.all_params_t) # , disconnected_inputs='ignore'
+        self.theano_grad = theano.function(self.all_vars_t, grad, on_unused_input='ignore')
     
     def set_wrt(self, params, params_t):
         self.params = params
@@ -182,7 +193,23 @@ class BASE(object):
         zerr_v =  self.encode(X[1:]) - self.transition(self.encode(X[:-1]))
         zerr_vp = numpy.dot(zerr_v, numpy.linalg.inv(self.Sz))
         return numpy.sum(numpy.multiply(zerr_v, zerr_vp))
-    
+
+    def _loss_t(self):
+        ''' horizon loss '''
+        rerr = 0.
+        ntot = 0.
+        A = TT.identity_like(self.T_t)
+        for i in xrange(self.h+1):
+
+            z = self.Z_t if i is 0 else self.Z_t[:-i]
+            r = self.R_t if i is 0 else self.R_t[i:]
+            rerr += TT.sum((self._reward_t(TT.dot(z, A)) - r)**2)
+            ntot += r.shape[0]
+
+            A = TT.dot(A, self.T_t)
+
+        return rerr / ntot + self._regularization_t()
+
     def loss(self, X, R):
         ''' callable, takes array of features X and rewards R and returns the
         loss given the current set of parameters. Examples through time are
@@ -209,19 +236,86 @@ class BASE(object):
         grad = self.theano_grad(*self.get_args(params, X, R))
         return self._flatten(grad)
 
+class Multistep_RSIS(BASE):
+
+    def __init__(self, *args, **kwargs):
+        super(Multistep_RSIS, self).__init__(*args, **kwargs)
+        self.compile_theano_funcs()
+    
+    def _loss_t(self):
+        zerr = 0.
+        rerr = TT.sum((self.R_t - self._reward_t(self.Z_t))**2)
+        ntot = 0.
+        A = TT.identity_like(self.T_t)
+        for i in xrange(1, self.h+1):
+
+            A = TT.dot(A, self.T_t)
+            z = self.Z_t[:-i]
+            zp = self.Z_t[i:] #  TODO add Sz_inv
+            r = self.R_t[i:]
+            zerr += TT.sum((TT.dot(z, A) - zp)**2)
+            rerr += TT.sum((self._reward_t(TT.dot(z, A)) - r)**2)
+            ntot += z.shape[0]
+
+        return zerr / ntot + rerr / ntot + self._regularization_t()
+
+    def _transition_error_t(self):
+        ''' overwrites base method adds zerr for all steps in horizon '''
+
+        #self.Tpows_t, _ = theano.scan(
+        #                    fn=lambda prior_result, T: TT.dot(prior_result, T),
+        #                    outputs_info=TT.identity_like(self.T_t),
+        #                    non_sequences=self.T_t,
+        #                    n_steps=self.h)
+        zerr = 0.
+        ntot = 0.
+        A = TT.identity_like(self.T_t)
+        for i in xrange(1, self.h+1):
+
+            A = TT.dot(A, self.T_t)
+            z = self.Z_t[:-i]
+            zp = self.Z_t[i:] #  TODO add Sz_inv
+            zerr += TT.sum((TT.dot(z, A) - zp)**2)
+            ntot += z.shape[0]
+
+        return zerr / ntot
+
+    def transition_error(self, X):
+        ''' overwrites base method, adds zerr for all steps in horizon '''
+        zerr = 0.
+        ntot = 0.
+        A = numpy.identity(self.T.shape[0])
+        for i in xrange(1, self.h+1):
+
+            A = numpy.dot(A, self.T)
+            z = self.encode(X[:-i])
+            zp = self.encode(X[i:]) #  TODO add Sz_inv
+            zerr += numpy.sum((numpy.dot(z, A) - zp)**2)
+            ntot += z.shape[0]
+
+        return zerr / ntot
+
+    def qr_step(self):
+        Q, U = numpy.linalg.qr(self.Phi)
+        self.Phi = Q
+        self.T = numpy.dot(U, numpy.dot(self.T, numpy.linalg.inv(U)))
+        self.q = numpy.dot(U, self.q)
 
 
-class Horizon_RSIS(BASE):
+
+class QR_RSIS(BASE):
+    
+    def qr_step(self):
+        Q, U = numpy.linalg.qr(self.Phi)
+        self.Phi = Q
+        self.T = numpy.dot(U, numpy.dot(self.T, numpy.linalg.inv(U)))
+        self.q = numpy.dot(U, self.q)
+
+
+class Alternating_RSIS(BASE):
 
     def __init__(self, *args, **kwargs):
         super(Horizon_RSIS, self).__init__(*args, **kwargs) 
-
-        # compute theano horizon loss function 
-        loss_t = self._loss_t() 
-        self.theano_loss = theano.function(self.all_vars_t, loss_t, on_unused_input='ignore')
-
-        grad = theano.grad(loss_t, self.all_params_t) # , disconnected_inputs='ignore'
-        self.theano_grad = theano.function(self.all_vars_t, grad, on_unused_input='ignore')
         
         # and model loss with static Phi
         model_err_t = self._model_loss_t() 
@@ -229,71 +323,22 @@ class Horizon_RSIS(BASE):
 
         model_grad_t = theano.grad(model_err_t, self.model_params_t, disconnected_inputs='ignore')
         self.model_grad = theano.function(self.all_vars_t, model_grad_t, on_unused_input='ignore')
-
-        ## compute reward and transition loss
-        #rerr_t = self._reward_error_t() 
-        #self.reward_loss = theano.function(self.all_vars_t, rerr_t, on_unused_input='ignore')
-
-        #rerr_grad_t = theano.grad(rerr_t, self.params_t, disconnected_inputs='ignore')
-        #self.reward_grad = theano.function(self.all_vars_t, rerr_grad_t, on_unused_input='ignore')
-
-        #zerr_t = self._transition_error_t() 
-        #self.transiton_loss = theano.function(self.all_vars_t, zerr_t, on_unused_input='ignore')
-
-        #zerr_grad_t = theano.grad(zerr_t, self.params_t, disconnected_inputs='ignore')
-        #self.transition_grad = theano.function(self.all_vars_t, zerr_grad_t, on_unused_input='ignore')
     
     @property
     def model_params_t(self):
         #return [self.T_t, self.q_t]
-        return self.all_params_t
+        return [self.Phi_t, self.T_t, self.q_t]
 
     @property
     def model_params(self):
         ''' subset of parameters concerned with learning the model in z-space
         given a feature mapping defined by Phi '''
         #return [self.T, self.q]
-        return self.all_params
+        return [self.Phi, self.T, self.q]
 
     @property
     def _model_args(self):
         return [self.Sz, self.sr]
-
-  
-    def scan_loss_t(self):
-        ''' seems to be just as fast, but takes longer to compile'''
-        
-        self.Tpows_t, _ = theano.scan(
-                            fn=lambda prior_result, T: TT.dot(prior_result, T),
-                            outputs_info=TT.identity_like(self.T_t),
-                            non_sequences=self.T_t,
-                            n_steps=self.h)
-        rerr = 0.
-        ntot = 0.
-        for i in xrange(self.h+1):
-
-            z = self.Z_t if i is 0 else self.Z_t[:-i]
-            r = self.R_t if i is 0 else self.R_t[i:]
-            z_pred = z if i is 0 else TT.dot(z, self.Tpows_t[i-1])
-            rerr += TT.sum((self._reward_t(z_pred) - r)**2)
-            ntot += r.shape[0]
-
-        return rerr / ntot + self._regularization_t()
-
-    def _loss_t(self):
-        rerr = 0.
-        ntot = 0.
-        A = TT.identity_like(self.T_t)
-        for i in xrange(self.h+1):
-
-            z = self.Z_t if i is 0 else self.Z_t[:-i]
-            r = self.R_t if i is 0 else self.R_t[i:]
-            rerr += TT.sum((self._reward_t(TT.dot(z, A)) - r)**2)
-            ntot += r.shape[0]
-
-            A = TT.dot(A, self.T_t)
-
-        return rerr / ntot + self._regularization_t()
 
     def get_model_args(self, params, X, R):
         params = params if (type(params) == list) else self._unpack_params(params)
