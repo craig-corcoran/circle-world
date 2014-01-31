@@ -1,9 +1,50 @@
 import numpy
+import scipy
 import theano
 import theano.tensor as TT
 import theano.sandbox.linalg.ops as LA
 
 theano.config.warn.subtensor_merge_bug = False
+
+class LSTD(object):
+    
+    def __init__(self, d, gam = 1e-2, shift = 2e-1, all_steps = False):
+            
+        # C = S - gam * Sp
+        self.S = numpy.zeros((d, d))
+        self.Sp = numpy.zeros((d, d))
+        self.b = numpy.zeros(d)
+        self.d = d
+        self.gam = gam
+        self.shift = shift
+        self.all_steps = all_steps
+
+    @property
+    def C(self):
+        return self.S - self.gam * self.Sp
+
+    def update_params(self, X, R):
+
+        nsteps = X.shape[0] if self.all_steps else 2
+        for i in xrange(1,nsteps):
+            self.S += numpy.dot(X[:-i].T, X[:-i])
+            self.Sp += numpy.dot(X[:-i].T, X[i:])
+            self.b += numpy.dot(X[:-i].T, R[:-i])
+
+    def get_weights(self):
+        try:
+            return scipy.linalg.solve(self.C, self.b) #numpy.linalg.solve(self.C, self.b)
+        except numpy.linalg.linalg.LinAlgError as e:
+            #logger.info('singular matrix error, using offset')
+            print 'singular matrix error, using offset'
+            return scipy.linalg.solve(self.C + self.shift * numpy.identity(self.d), self.b)
+
+    def get_value(self, X):
+        lstd_w = self.get_weights()
+        return numpy.dot(X, lstd_w)
+
+# TODO projected LSTD
+
 
 class BASE(object):
     ''' base model class which defines the central model variables and
@@ -57,15 +98,18 @@ class BASE(object):
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
         self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
         self.Sz_inv_t = LA.matrix_inverse(self.Sz_t + self.inv_shift_t)
+        self.Tpows_t, _ = theano.scan(
+                            fn=lambda prior_result, T: TT.dot(prior_result, T),
+                            outputs_info=TT.identity_like(self.T_t),
+                            non_sequences=self.T_t,
+                            n_steps=self.h)
+
         
-        # create a dictionary of 'name' : (var, theano_var) items
-        #self.variables = dict(zip([x.name for x in self.all_params_t], zip(self.all_vars, self.all_vars_t)))
         self.params = self.all_params
         self.params_t = self.all_params_t
 
     
     def compile_theano_funcs(self): 
-        
         # compute theano horizon loss function 
         loss_t = self._loss_t() 
         self.theano_loss = theano.function(self.all_vars_t, loss_t, on_unused_input='ignore')
@@ -236,6 +280,7 @@ class BASE(object):
         grad = self.theano_grad(*self.get_args(params, X, R))
         return self._flatten(grad)
 
+
 class Multistep_RSIS(BASE):
 
     def __init__(self, *args, **kwargs):
@@ -262,11 +307,6 @@ class Multistep_RSIS(BASE):
     def _transition_error_t(self):
         ''' overwrites base method adds zerr for all steps in horizon '''
 
-        #self.Tpows_t, _ = theano.scan(
-        #                    fn=lambda prior_result, T: TT.dot(prior_result, T),
-        #                    outputs_info=TT.identity_like(self.T_t),
-        #                    non_sequences=self.T_t,
-        #                    n_steps=self.h)
         zerr = 0.
         ntot = 0.
         A = TT.identity_like(self.T_t)
@@ -302,8 +342,12 @@ class Multistep_RSIS(BASE):
         self.q = numpy.dot(U, self.q)
 
 
-
 class QR_RSIS(BASE):
+
+    def __init__(self, *args, **kwargs):
+        super(QR_RSIS, self).__init__(*args, **kwargs)
+        self.compile_theano_funcs()
+
     
     def qr_step(self):
         Q, U = numpy.linalg.qr(self.Phi)

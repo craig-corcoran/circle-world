@@ -74,24 +74,10 @@ def main(
         gam = 1-1e-2,
         ):
 
-    if h is None:
-        
-        logger.info('setting horizon to batch length: %i' % n)
-        h = n
-
     #os.system('rm plots/*.png')
     os.system('mv plots/*.png plots/old/')
     
-    logger.info('constructing world and feature map')
-    world = rsis.CircleWorld(gam = gam)
-    #world = rsis.TorusWorld()
-    fmap = rsis.FourierFeatureMap(N)
-    #fmap = rsis.TileFeatureMap(N**2)
-
-    logger.info('dimension of raw features: ' + str(fmap.d))
-
-    it = 0
-
+    
     def sample_circle_world(n, plot = False):
         P, R = world.get_samples(n)
 
@@ -120,34 +106,39 @@ def main(
     def evaluate(x_test = None, r_test = None):
         if x_test is None:
             x_test, r_test = sample_circle_world(4*n)
-        try:
-            lstd_w = numpy.linalg.solve(C, b)
-        except numpy.linalg.linalg.LinAlgError as e:
-            logger.info('linalg error: %s. using offset' % str(e))
-            lstd_w = numpy.linalg.solve(C + shift * numpy.identity(fmap.d), b)
 
         model_val = model.value_func(x_test, gam)
-        lstd_val = numpy.dot(x_test, lstd_w)
+        lstd_val0 = lstd0.get_value(x_test)
+        lstd_val1 = lstd1.get_value(x_test)
 
-        model_err_all = td_error(model_val, r_test, all_steps=True)
+        target_err = model.loss(x_test, r_test)
+
         model_err0 = td_error(model_val, r_test, all_steps=False)
-        lstd_err_all = td_error(lstd_val, r_test, all_steps=True)
-        lstd_err0 = td_error(lstd_val, r_test, all_steps=False)
+        model_err1 = td_error(model_val, r_test, all_steps=True)
+        lstd0_err0 = td_error(lstd_val0, r_test, all_steps=False)
+        lstd0_err1 = td_error(lstd_val0, r_test, all_steps=True)
+        lstd1_err0 = td_error(lstd_val1, r_test, all_steps=False)
+        lstd1_err1 = td_error(lstd_val1, r_test, all_steps=True)
 
         model_rerr = model.reward_error(x_test, r_test) / n
         model_zerr = model.transition_error(x_test) / (n-1)
         
-        logger.info('sample lstd error; all-steps, one-step: %05f, %05f' % (lstd_err_all, lstd_err0))
-        logger.info('sample model error; all-steps, one-step: %05f, %05f' % (model_err_all, model_err0))
-        logger.info('sample reward error: %s' % str(model_rerr))
-        logger.info('sample transition error: %s' % str(model_zerr))
+        logger.info('h/o sample target loss: %.5f', model.loss(X_test, R_test))
+        logger.info('h/o sample reward error: %s' % str(model_rerr))
+        logger.info('h/o sample transition error: %s' % str(model_zerr))
+        logger.info('h/o sample lstd0 error; all-steps: %05f; one-step: %05f' % (lstd0_err1, lstd0_err0))
+        logger.info('h/o sample lstd1 error; all-steps, %05f; one-step: %05f' % (lstd1_err1, lstd1_err0))
+        logger.info('h/o sample model error; all-steps, %05f; one-step: %05f' % (model_err1, model_err0))
 
         return {'td-error0': model_err0,
-                'td-error-all': model_err_all,
-                'lstd-error0': lstd_err0,
-                'lstd-error-all': lstd_err_all,
+                'td-error1': model_err1,
+                'lstd0-error0': lstd0_err0,
+                'lstd1-error0': lstd1_err0,
+                'lstd0-error1': lstd0_err1,
+                'lstd1-error1': lstd1_err1,
                 'reward-error': model_rerr, 
-                'transition-error': model_zerr}
+                'transition-error': model_zerr,
+                'target-error': target_err}
 
     def td_error(v, r, all_steps = True):
         ntot = 0
@@ -157,26 +148,27 @@ def main(
             ntot += r[:-i].shape[0]
         return los / ntot
 
-    def log():
-        logger.info('train loss: %.5f', model.loss(X, R))
-        logger.info('test loss: %.5f', model.loss(X_test, R_test))
-        
+    def print_param_norms():
         phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
         T_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.T)
-        #S_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Sz)
-
         logger.info('average Phi column norm: ' + str(numpy.average(phi_norms)))
         logger.info('average T column norms: ' + str(numpy.average(T_norms)))
         logger.info('q norm: ' + str(numpy.linalg.norm(model.q)))
-        #logger.info('Sz column norms: ' + str(S_norms))
-        #logger.info('s: ' + str(model.sr))
     
+    
+    logger.info('constructing world and feature map')
+    world = rsis.CircleWorld(gam = gam)
+    #world = rsis.TorusWorld()
+    fmap = rsis.FourierFeatureMap(N)
+    #fmap = rsis.TileFeatureMap(N**2)
+
+    logger.info('dimension of raw features: ' + str(fmap.d))
+
+ 
     logger.info('constructing theano model')
-    
     t = time.time()
-    #model = rsis.Alternating_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
-    #model = rsis.QR_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
-    model = rsis.Multistep_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
+    model = rsis.QR_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
+    #model = rsis.Multistep_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
  
     logger.info('time to compile model: ' + str(time.time() - t))
     
@@ -187,16 +179,20 @@ def main(
                     ])
     
     X_test, R_test = sample_circle_world(4*n)
-    C = numpy.zeros((fmap.d, fmap.d))
-    b = numpy.zeros(fmap.d)
+
+    lstd0 = rsis.LSTD(fmap.d, all_steps = False)
+    lstd1 = rsis.LSTD(fmap.d, all_steps = True)
     loss_values = []
+    it = 0
     try:
         for it in range(batches):
             logger.info('*** iteration ' + str(it) + '***')
             
             X, R = sample_circle_world(n)
-            C += numpy.dot(X[:-1].T, X[:-1]-gam*X[1:])
-            b += numpy.dot(X[:-1].T, R[:-1])
+
+            # collect feature statistics for use w/ lstd 
+            lstd0.update_params(X, R)
+            lstd1.update_params(X, R)
 
             for key, val in losses.items():
                 
@@ -206,9 +202,6 @@ def main(
                 logger.info('descending %s loss' % key)
 
                 #model.set_wrt(wrt, wrt_t)
-
-                #model.qr_step()
-                #loss_values.append(evaluate(X_test, R_test))
 
                 t = time.time()
                 model.set_params(
@@ -230,9 +223,6 @@ def main(
                 if it % 10 == 0:
                     plot_learned(N)
                 
-                log()
-
-
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
     
@@ -240,6 +230,11 @@ def main(
 
     logger.info('final q: ' + str(model.q))
     logger.info('final w: ' + str(model.w))
+    
+    logger.info('norm of model weights: %05f' % numpy.sum(numpy.dot(model.Phi, model.w)**2))
+    logger.info('norm of lstd0 weights: %05f' % numpy.sum(lstd0.get_weights()**2))
+    logger.info('norm of lstd1 weights: %05f' % numpy.sum(lstd1.get_weights()**2))
+
     plot_learned(N)
 
     df = pandas.DataFrame(loss_values)
@@ -247,24 +242,29 @@ def main(
     
     def plot_loss_curve():
         
+        # add line for td error of the true value function 
+
         plt.clf()
 
         for c in df.columns:
 
             y = df[c].values
 
-            if c in ['transition-error', 'reward-error']:
-                plt.subplot(211)
+            if c in ['transition-error', 'reward-error', 'target-error']:
+                plt.subplot(311)
                 plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
                 #plt.ylim([0,numpy.max(df['transition-error'].values)])
-
-            else:
-                plt.subplot(212)
+            if 'lstd' in c:
+                plt.subplot(312)
+                plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
+            if 'td' in c:
+                plt.subplot(313)
                 plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
                 #plt.ylim([0, numpy.max(df['transition-error'].values)])
     
-        plt.subplot(211); plt.legend()
-        plt.subplot(212); plt.legend()
+        plt.subplot(311); plt.legend()
+        plt.subplot(312); plt.legend()
+        plt.subplot(313); plt.legend()
         plt.savefig('plots/loss-curve%s.png' % timestamp)
 
     def plot_value_rew():
@@ -273,20 +273,13 @@ def main(
         X = fmap.transform(P)
         R = world.reward_func(P) # true reward function
         
-        try:
-            lstd_w = numpy.linalg.solve(C, b)
-        except numpy.linalg.linalg.LinAlgError as e:
-            print e
-            logger.info('singular matrix error, using offset')
-            lstd_w = numpy.linalg.solve(C + shift * numpy.identity(fmap.d), b)
-
-        lstd_val = numpy.dot(X, lstd_w)
+        lstd_val0 = lstd0.get_value(X)
+        lstd_val1 = lstd1.get_value(X)        
         model_val = model.value_func(X, gam)
-        x, r = sample_circle_world(4*n)
-        model_lstd_val = model.lstd_value_func(x, r, gam, X)
+        #model_lstd_val = model.lstd_value_func(x, r, gam, X) # XXX replace with lstd object statistics, add closest reward fn - projected LSTD
         model_rew = model.reward_func(X)
 
-        value_list = [model_val, model_lstd_val, lstd_val]
+        value_list = [model_val, lstd_val0, lstd_val1]
         if hasattr(world, 'value_func'):
             value_list.append(world.value_func(P))
 
@@ -298,5 +291,6 @@ def main(
 
 
 if __name__ == '__main__':
+
     rsis.script(main)
     #view_fourier_basis()
