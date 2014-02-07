@@ -7,7 +7,7 @@ class CircleWorld(object):
     circle and rewards. The rewards and transitions (rotations) are linear in
     the position z with gaussian noise.  """
 
-    def __init__(self, theta = 16*np.pi/np.e**np.pi, gam = 1-1e-2, eps_z = 1e-2, eps_th = 1e-3, eps_r = 1e-6):
+    def __init__(self, theta = 8*np.pi/np.e**np.pi, gam = 1-1e-2, eps_z = 1e-2, eps_th = 1e-3, eps_r = 1e-6):
         self.z = self.init_z
         self.q = np.array([1,1])
         self.theta = theta # roatation angle mean/bias
@@ -18,7 +18,7 @@ class CircleWorld(object):
         self.eps_th = eps_th
         self.eps_r = eps_r
 
-        self.w = np.linalg.solve(np.identity(self.T.shape[0]) - self.gam * self.T.T, self.q)
+        self.w = np.linalg.solve(np.identity(self.T.shape[0]) - self.gam * self.T, self.q)
     
     @staticmethod
     def rotation(theta):
@@ -39,16 +39,19 @@ class CircleWorld(object):
         ''' expected reward function '''
         return np.dot(x, self.q)
 
-    def get_samples(self, n, reset_state = True):
+    def get_samples(self, n, reset_state = True, seed = None):
         ''' return n samples of the state and reward '''
         if reset_state:
             self.z = self.init_z
+
+        if seed:
+            rng.seed(seed)
 
         states = np.empty((n, 2))
         rewards = np.empty(n)
         for i in xrange(n):
             T = CircleWorld.rotation(self.theta + self.eps_th*rng.randn())
-            self.z = np.dot(T, self.z) 
+            self.z = np.dot(self.z, T) 
             self.z += self.eps_z*rng.randn()*np.linalg.norm(self.z)*self.z
     
             # the state can't leave the unit circle
@@ -76,7 +79,8 @@ class TorusWorld(object):
     def reward_func(self, x):
         return np.array([self._reward(x[i]) for i in xrange(x.shape[0])])
 
-    def get_samples(self, n):
+    def get_samples(self, n, seed = None):
+        if seed: rng.seed(seed)
         z = (rng.randn(2) + 1) % 2 - 1
         states = np.empty((n, 2))
         rewards = np.empty(n)

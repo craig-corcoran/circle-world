@@ -8,7 +8,7 @@ theano.config.warn.subtensor_merge_bug = False
 
 class LSTD(object):
     
-    def __init__(self, d, gam = 1e-2, shift = 2e-1, all_steps = False):
+    def __init__(self, d, gam = 1-1e-2, shift = 2., all_steps = False):
             
         # C = S - gam * Sp
         self.S = numpy.zeros((d, d))
@@ -18,32 +18,98 @@ class LSTD(object):
         self.gam = gam
         self.shift = shift
         self.all_steps = all_steps
+        self.ntot = 0
+        self.changed = False
 
     @property
     def C(self):
         return self.S - self.gam * self.Sp
 
     def update_params(self, X, R):
-
         nsteps = X.shape[0] if self.all_steps else 2
         for i in xrange(1,nsteps):
-            self.S += numpy.dot(X[:-i].T, X[:-i])
-            self.Sp += numpy.dot(X[:-i].T, X[i:])
-            self.b += numpy.dot(X[:-i].T, R[:-i])
+            
+            h = X[i:].shape[0]
+            self.ntot += h
 
-    def get_weights(self):
+            self.S += numpy.dot(X[:-i].T, X[:-i])
+            self.Sp += numpy.dot(X[:-i].T, self.gam**i * X[i:])
+            
+            M = numpy.zeros((X.shape[0], h))
+            for j in xrange(h):
+                M[j:j+i, j] = self.gam**numpy.arange(i)
+                
+            r = numpy.dot(R, M)
+            self.b += numpy.dot(X[:-i].T, r)
+
+        self.changed = True
+
+    def get_reward(self, X):
         try:
-            return scipy.linalg.solve(self.C, self.b) #numpy.linalg.solve(self.C, self.b)
+            q = scipy.linalg.solve(self.S, self.b)
         except numpy.linalg.linalg.LinAlgError as e:
             #logger.info('singular matrix error, using offset')
             print 'singular matrix error, using offset'
-            return scipy.linalg.solve(self.C + self.shift * numpy.identity(self.d), self.b)
+            q = scipy.linalg.solve(self.S + self.shift * numpy.identity(self.d), self.b)
+        
+        return numpy.dot(X, q)
+
+    def get_weights(self):
+        C = self.C / self.ntot
+        b = self.b / self.ntot
+        try:
+            return scipy.linalg.solve(C, b) 
+        except numpy.linalg.linalg.LinAlgError as e:
+            #logger.info('singular matrix error, using offset')
+            print 'singular matrix error, using offset'
+            return scipy.linalg.solve(C + self.shift * numpy.identity(self.d), b)
 
     def get_value(self, X):
-        lstd_w = self.get_weights()
-        return numpy.dot(X, lstd_w)
+        if self.changed:
+            self.lstd_w = self.get_weights()
+        return numpy.dot(X, self.lstd_w)
 
-# TODO projected LSTD
+class LowRankLSTD(object):
+    
+    ''' low rank lstd maintains full base feature statistics X^T X, but projects
+    onto smaller basis Phi before solving for weights. Phi is learned iteratively.'''
+
+    def __init__(self,
+                d, # dim of input features
+                k, # dim of learned representation
+                l1 = 1e-3, # l1 regularization constant
+                l2 = 1e-6, # l2 regularization constant
+                shift = 1e-12,
+                init_scale = 1e-1,
+                Phi = None, # feature transform matrix f(x) = Phi x; [dxk]
+                T = None, # transition matrix; Tz_t = z_t+1
+                q = None, # reward function weights; r(x) = q' Phi x
+                w = None, # value function weights; v(x) = w' Phi x
+                ):
+        
+        self.d = d
+        self.k = k
+        self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
+        self.T = T if T else numpy.identity(k) 
+        self.q = q if q else init_scale*numpy.random.standard_normal(k) 
+        self.l1 = l1
+        self.l2 = l2
+        self.shift = shift
+        self.inv_shift = shift*numpy.identity(k)
+        self.w = None # can solve for this upon value funct query
+
+        self.Phi_t = TT.dmatrix('Phi')
+        self.T_t = TT.dmatrix('T')
+        self.q_t = TT.dvector('q')
+        self.X_t = TT.dmatrix('X')
+        self.R_t = TT.dvector('R')
+       
+        self.n_t = TT.sum(TT.ones_like(self.R_t))
+        self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
+        self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
+    
+
+         
 
 
 class BASE(object):
@@ -93,7 +159,6 @@ class BASE(object):
         self.X_t = TT.dmatrix('X')
         self.R_t = TT.dvector('R')
         
-        self.ev_t, self.U_t = LA.eig(self.T_t)
         self.n_t = TT.sum(TT.ones_like(self.R_t))
         self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
         self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)

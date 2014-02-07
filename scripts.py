@@ -62,24 +62,28 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
 
 
 def main(
-        batches = 50, # number of iterations to run cg for
-        n = 1000, # number of samples per minibatch
+        batches = 30, # number of iterations to run cg for
+        n = 100, # number of samples per minibatch
         N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
-        k = 8,  # number of compressed features, Phi is [dxk]
+        k = 4,  # number of compressed features, Phi is [dxk]
         h = 20, # horizon for reward loss
         max_iter = 3, # max number of cg optimizer steps per iteration
-        l1 = 1e-2, # applied to Phi
-        l2 = 1e-2, # applied to params[1:]
+        l1 = 4e-4,
+        l2 = 1e-6,
+        #l1 = 1e-2, # applied to Phi
+        #l2 = 1e-2, # applied to params[1:]
         shift = 1e-12,
         gam = 1-1e-2,
         ):
+
+
 
     #os.system('rm plots/*.png')
     os.system('mv plots/*.png plots/old/')
     
     
-    def sample_circle_world(n, plot = False):
-        P, R = world.get_samples(n)
+    def sample_circle_world(n, plot = False, seed=None):
+        P, R = world.get_samples(n, seed=seed)
 
         if plot and (it % 10 == 0): 
             plot_samples(P)
@@ -99,8 +103,8 @@ def main(
         P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
         X = fmap.transform(P)
         Z = model.encode(X)
-        l = int(numpy.sqrt(k))
-        tup = (l,l) if k > 2 else (1,k)
+        l = int(numpy.sqrt(k))  # XXX
+        tup = (l,k//l) if k > 2 else (1,k)
         plot_filters(Z, tup, 'plots/learned_basis_%s.%05d.png' % (key, it))
 
     def evaluate(x_test = None, r_test = None):
@@ -143,9 +147,16 @@ def main(
     def td_error(v, r, all_steps = True):
         ntot = 0
         los = 0.
-        for i in xrange(1, r.shape[0] if all_steps else 2):
-            los += numpy.sum((r[:-i] + gam * v[i:] - v[:-i])**2) 
-            ntot += r[:-i].shape[0]
+        for i in xrange(1, len(r) if all_steps else 2):
+            hh = len(r[i:])
+            M = numpy.zeros((len(r), hh))
+            for j in xrange(hh):
+                M[j:j+i, j] = gam**numpy.arange(i)
+
+            acc_r = numpy.dot(r, M)
+            los += numpy.sum((acc_r + gam**i * v[i:] - v[:-i])**2) 
+            ntot += hh
+
         return los / ntot
 
     def print_param_norms():
@@ -157,10 +168,10 @@ def main(
     
     
     logger.info('constructing world and feature map')
-    world = rsis.CircleWorld(gam = gam)
-    #world = rsis.TorusWorld()
-    fmap = rsis.FourierFeatureMap(N)
-    #fmap = rsis.TileFeatureMap(N**2)
+    #world = rsis.CircleWorld(gam = gam)
+    world = rsis.TorusWorld()
+    #fmap = rsis.FourierFeatureMap(N)
+    fmap = rsis.TileFeatureMap(N**2)
 
     logger.info('dimension of raw features: ' + str(fmap.d))
 
@@ -168,8 +179,6 @@ def main(
     logger.info('constructing theano model')
     t = time.time()
     model = rsis.QR_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
-    #model = rsis.Multistep_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
- 
     logger.info('time to compile model: ' + str(time.time() - t))
     
     losses = collections.OrderedDict(
@@ -178,7 +187,8 @@ def main(
                     #('model', (model.optimize_model_loss, model.optimize_model_grad, model.model_params, model.model_params_t)),
                     ])
     
-    X_test, R_test = sample_circle_world(4*n)
+    
+    X_test, R_test = sample_circle_world(10000, seed=0)
 
     lstd0 = rsis.LSTD(fmap.d, all_steps = False)
     lstd1 = rsis.LSTD(fmap.d, all_steps = True)
@@ -186,6 +196,7 @@ def main(
     it = 0
     try:
         for it in range(batches):
+            
             logger.info('*** iteration ' + str(it) + '***')
             
             X, R = sample_circle_world(n)
@@ -215,13 +226,16 @@ def main(
                 )
                 logger.info('time for cg iteration: %f' % (time.time()-t))
                 
-                loss_values.append(evaluate(X_test, R_test))
-                
+                                
                 #model.qr_step()
                 #loss_values.append(evaluate(X_test, R_test))                
+                print_param_norms()
                  
                 if it % 10 == 0:
                     plot_learned(N)
+
+                loss_values.append(evaluate(X_test, R_test))
+
                 
     except KeyboardInterrupt:
         logger.info( '\n user stopped current training loop')
@@ -254,13 +268,13 @@ def main(
                 plt.subplot(311)
                 plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
                 #plt.ylim([0,numpy.max(df['transition-error'].values)])
-            if 'lstd' in c:
+            if 'td' in c:
                 plt.subplot(312)
                 plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
-            if 'td' in c:
-                plt.subplot(313)
-                plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
                 #plt.ylim([0, numpy.max(df['transition-error'].values)])
+            if 'lstd1' in c:
+                plt.subplot(313)
+                plt.plot(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
     
         plt.subplot(311); plt.legend()
         plt.subplot(312); plt.legend()
@@ -277,13 +291,16 @@ def main(
         lstd_val1 = lstd1.get_value(X)        
         model_val = model.value_func(X, gam)
         #model_lstd_val = model.lstd_value_func(x, r, gam, X) # XXX replace with lstd object statistics, add closest reward fn - projected LSTD
+        
+        lstd0_rew = lstd0.get_reward(X)
+        lstd1_rew = lstd1.get_reward(X)
         model_rew = model.reward_func(X)
-
         value_list = [model_val, lstd_val0, lstd_val1]
+        
         if hasattr(world, 'value_func'):
             value_list.append(world.value_func(P))
 
-        plot_filters(numpy.vstack([model_rew, R]).T, (1, 2), file_name='plots/rewards%s.png' % timestamp)
+        plot_filters(numpy.vstack([model_rew, lstd0_rew, lstd1_rew, R]).T, (1, 4), file_name='plots/rewards%s.png' % timestamp)
         plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values%s.png' % timestamp)
 
     plot_value_rew()    
