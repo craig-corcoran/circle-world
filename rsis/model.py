@@ -64,6 +64,7 @@ class LSTD(object):
             print 'singular matrix error, using offset'
             return scipy.linalg.solve(C + self.shift * numpy.identity(self.d), b)
 
+
     def get_value(self, X):
         if self.changed:
             self.lstd_w = self.get_weights()
@@ -77,39 +78,206 @@ class LowRankLSTD(object):
     def __init__(self,
                 d, # dim of input features
                 k, # dim of learned representation
+                gam, # discount factor for MDP
                 l1 = 1e-3, # l1 regularization constant
-                l2 = 1e-6, # l2 regularization constant
-                shift = 1e-12,
+                l2d = 1e-2, # l2 regularization constant
+                l2k = 1e-6,
                 init_scale = 1e-1,
                 Phi = None, # feature transform matrix f(x) = Phi x; [dxk]
-                T = None, # transition matrix; Tz_t = z_t+1
-                q = None, # reward function weights; r(x) = q' Phi x
-                w = None, # value function weights; v(x) = w' Phi x
+                S = None,
+                Sp = None,
+                b = None,
                 ):
         
         self.d = d
         self.k = k
-        self.Phi = init_scale*numpy.random.standard_normal((d,k)) if Phi is None else Phi
-        self.T = T if T else numpy.identity(k) 
-        self.q = q if q else init_scale*numpy.random.standard_normal(k) 
+        self.gam = gam
         self.l1 = l1
-        self.l2 = l2
-        self.shift = shift
-        self.inv_shift = shift*numpy.identity(k)
+        self.l2d = l2d
+        self.l2k = l2k
+        # XXX apply regularization appropriately
+
+        self.Phi = Phi if Phi else init_scale*numpy.random.standard_normal((d,k)) 
+        self.S = S if S else numpy.zeros((d,d))
+        self.Sp = Sp if Sp else numpy.zeros((d,d))
+        self.b = b if b else numpy.zeros(d)
+
         self.w = None # can solve for this upon value funct query
+        self.u = None 
+        self.changed = True # statistics changed, re-solve for w/u?
 
         self.Phi_t = TT.dmatrix('Phi')
-        self.T_t = TT.dmatrix('T')
-        self.q_t = TT.dvector('q')
-        self.X_t = TT.dmatrix('X')
+        self.S_t = TT.dmatrix('S') # S = X^T X ; Sp = X^T Xp
+        self.Sp_t = TT.dmatrix('Sp') # C = (S - gam * Sp)
+        self.b_t = TT.dvector('b') # b = X^T R accumulated
+        self.X_t = TT.dmatrix('X') # X and R for error
         self.R_t = TT.dvector('R')
        
-        self.n_t = TT.sum(TT.ones_like(self.R_t))
-        self.Z_t = self._encode_t(self.X_t) # encode X into low-d state Z
-        self.inv_shift_t = TT.sharedvar.scalar_constructor(shift) * TT.identity_like(self.T_t)
-    
+        self.dshift_t = TT.sharedvar.scalar_constructor(self.l2d) * TT.identity_like(self.S_t)        
+        self.kshift_t = TT.sharedvar.scalar_constructor(self.l2k) * TT.identity_like(TT.dot(self.Phi_t.T, self.Phi_t))        
+        self.Z_t = self.encode_t(self.X_t) # encode X into low-d state Z
+        self.C_t = self.S_t - self.gam * self.Sp_t
+        self.w_t = TT.dot(LA.matrix_inverse(self.C_t + self.dshift_t), self.b_t)
+        #self.w_t = LA.solve(self.C_t, self.b_t)
 
-         
+        self.D_t = TT.dot(TT.dot(self.Phi_t.T, self.C_t), self.Phi_t) # D = Phi^T C Phi
+        self.c_t = TT.dot(self.Phi_t.T, self.b_t)
+        #self.u_t = LA.solve(self.D_t, self.c_t) # XXX add shift here and solve above?
+        self.u_t = TT.dot(LA.matrix_inverse(self.D_t + self.kshift_t), self.c_t)
+
+        self.Vu_t = TT.dot(self.Z_t, self.u_t)
+        self.Vw_t = TT.dot(self.X_t, self.w_t)
+
+        self.uloss_t = self.td_error_t(self.Vu_t)
+        self.wloss_t = self.td_error_t(self.Vw_t)
+
+        self.compile_theano_funcs()
+    # XXX remove shift, make lstd loss all numpy, fix updates and weight setting
+    @property
+    def D(self):
+        return numpy.dot(numpy.dot(self.Phi.T, self.C), self.Phi)
+
+    @property
+    def c(self):
+        return numpy.dot(self.Phi.T, self.b)
+
+    def update_statistics(self, X, R):
+
+        self.S += numpy.dot(X[:-1].T, X[:-1])
+        self.Sp += numpy.dot(X[:-1].T, self.gam * X[1:])
+        self.b += numpy.dot(X[:-1].T, R[:-1])
+        self.changed = True
+
+    def get_values(self, X):
+        model_val = self.get_model_value(X)
+        lstd_val = self.get_lstd_value(X)
+        self.changed = False # now that w and u set by most current data
+        return model_val, lstd_val
+
+    def get_model_value(self, X):
+        if self.changed:
+            self.u = self.get_model_weights()
+        return numpy.dot(self.encode(X), self.u)
+
+    def get_model_weights(self):
+        try:
+            return scipy.linalg.solve(self.D, self.c) 
+        except numpy.linalg.linalg.LinAlgError as e:
+            #logger.info('singular matrix error, using offset')
+            print 'model singular matrix error, using offset'
+            return scipy.linalg.solve(self.D + self.shift*numpy.identity(self.k), self.b)
+
+    def get_lstd_value(self, X):
+        if self.changed:
+            self.w = self.get_lstd_weights()
+        return numpy.dot(X, self.w)
+
+    def get_lstd_weights(self):
+        try:
+            return scipy.linalg.solve(self.C, self.b) 
+        except numpy.linalg.linalg.LinAlgError as e:
+            #logger.info('singular matrix error, using offset')
+            print 'lstd singular matrix error, using offset'
+            return scipy.linalg.solve(self.C + self.shift*numpy.identity(self.d), self.b)
+
+    @property
+    def C(self):
+        return self.S - self.gam * self.Sp        
+    
+    @property
+    def params_t(self):
+        return [self.Phi_t]
+
+    @property
+    def params(self):
+        return [self.Phi]
+
+    @property
+    def flat_params(self, params=None):
+        return self._flatten(self.params)
+    
+    @property
+    def shapes(self):
+        return map(numpy.shape, self.params)
+
+    @property
+    def param_names(self):
+        return [x.name for x in self.params_t]
+
+    @staticmethod
+    def _flatten(params):
+        z = numpy.array([])
+        for p in params:
+            z = numpy.append(z, p.flatten())
+        return z
+
+    def set_params(self, params, flat = True):
+        if flat:
+            assert params.ndim == 1
+            self.set_params(self._unpack_params(params), flat = False)
+        else:
+            for i, name in enumerate(self.param_names): 
+                self.__setattr__(name, params[i])
+
+    def _unpack_params(self, vec):
+        i = 0
+        params = []
+        for s in self.shapes:
+            j = i + numpy.product(s)
+            params.append(vec[i:j].reshape(s))
+            i = j
+        return params
+
+    def compile_theano_funcs(self): 
+        # compute theano loss function 
+        loss_vars = [self.Phi_t, self.S_t, self.Sp_t, self.b_t, self.X_t, self.R_t]
+        self.theano_loss = theano.function(loss_vars, self.uloss_t) # on_unused_input='ignore')
+
+        grad = theano.grad(self.uloss_t, self.params_t) # , disconnected_inputs='ignore'
+        self.theano_grad = theano.function(loss_vars, grad) # on_unused_input='ignore')
+
+        lstd_vars = [self.S_t, self.Sp_t, self.b_t, self.X_t, self.R_t]
+        self.theano_lstd_loss = theano.function(lstd_vars,  self.wloss_t)
+
+    def td_error_t(self, V):
+        ''' temporal difference (Bellman) error for given value function V wrt R '''
+        return TT.sum((self.R_t[:-1] + self.gam * V[1:] - V[:-1])**2)
+    
+    def encode(self, x):
+        return numpy.dot(x, self.Phi)
+
+    def encode_t(self, x):
+        return TT.dot(x, self.Phi_t)
+
+    def regularization_t(self):
+        return self.l1 * TT.sum(abs(self.Phi_t)) # TT.sum(self.Phi_t**2)
+
+    def lstd_loss(self, X, R):
+        return self.theano_lstd_loss(*[self.S, self.Sp, self.b, X, R])
+
+    def loss(self, X, R):
+        ''' callable, takes array of features X and rewards R and returns the
+        loss given the current set of parameters. Examples through time are
+        indexed by row '''
+
+        return self.theano_loss(*[self.Phi, self.S, self.Sp, self.b, X, R])
+
+    def grad(self, X, R):
+        ''' returns gradient at the current parameters with the given inputs X
+        and R. '''
+        return self.theano_grad(*[self.Phi, self.S, self.Sp, self.b, X, R])
+
+    def get_args(self, params, X, R):
+        params = params if (type(params) == list) else self._unpack_params(params)        
+        return params + [self.S, self.Sp, self.b, X, R]
+
+    def optimize_loss(self, params, X, R):
+        return self.theano_loss(*self.get_args(params, X, R))
+
+    def optimize_grad(self, params, X, R):
+        grad = self.theano_grad(*self.get_args(params, X, R))
+        return self._flatten(grad)
+
 
 
 class BASE(object):

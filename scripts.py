@@ -63,20 +63,15 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
 
 def main(
         batches = 30, # number of iterations to run cg for
-        n = 100, # number of samples per minibatch
+        n = 1000, # number of samples per minibatch
         N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
         k = 4,  # number of compressed features, Phi is [dxk]
-        h = 20, # horizon for reward loss
         max_iter = 3, # max number of cg optimizer steps per iteration
         l1 = 4e-4,
-        l2 = 1e-6,
-        #l1 = 1e-2, # applied to Phi
-        #l2 = 1e-2, # applied to params[1:]
-        shift = 1e-12,
+        l2d = 1e-2,
+        l2k = 1e-3
         gam = 1-1e-2,
         ):
-
-
 
     #os.system('rm plots/*.png')
     os.system('mv plots/*.png plots/old/')
@@ -103,95 +98,43 @@ def main(
         P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
         X = fmap.transform(P)
         Z = model.encode(X)
-        l = int(numpy.sqrt(k))  # XXX
+        l = int(numpy.sqrt(k)) # XXX
         tup = (l,k//l) if k > 2 else (1,k)
-        plot_filters(Z, tup, 'plots/learned_basis_%s.%05d.png' % (key, it))
+        plot_filters(Z, tup, 'plots/learned_basis_.%05d.png' % it)
 
     def evaluate(x_test = None, r_test = None):
         if x_test is None:
             x_test, r_test = sample_circle_world(4*n)
 
-        model_val = model.value_func(x_test, gam)
-        lstd_val0 = lstd0.get_value(x_test)
-        lstd_val1 = lstd1.get_value(x_test)
-
-        target_err = model.loss(x_test, r_test)
-
-        model_err0 = td_error(model_val, r_test, all_steps=False)
-        model_err1 = td_error(model_val, r_test, all_steps=True)
-        lstd0_err0 = td_error(lstd_val0, r_test, all_steps=False)
-        lstd0_err1 = td_error(lstd_val0, r_test, all_steps=True)
-        lstd1_err0 = td_error(lstd_val1, r_test, all_steps=False)
-        lstd1_err1 = td_error(lstd_val1, r_test, all_steps=True)
-
-        model_rerr = model.reward_error(x_test, r_test) / n
-        model_zerr = model.transition_error(x_test) / (n-1)
+        model_tderr = model.loss(x_test, r_test)
+        lstd_tderr = model.lstd_loss(x_test, r_test)
         
-        logger.info('h/o sample target loss: %.5f', model.loss(X_test, R_test))
-        logger.info('h/o sample reward error: %s' % str(model_rerr))
-        logger.info('h/o sample transition error: %s' % str(model_zerr))
-        logger.info('h/o sample lstd0 error; all-steps: %05f; one-step: %05f' % (lstd0_err1, lstd0_err0))
-        logger.info('h/o sample lstd1 error; all-steps, %05f; one-step: %05f' % (lstd1_err1, lstd1_err0))
-        logger.info('h/o sample model error; all-steps, %05f; one-step: %05f' % (model_err1, model_err0))
+        #model_rerr = model.reward_error(x_test, r_test) / n
+        #model_zerr = model.transition_error(x_test) / (n-1)
+        
+        logger.info('h/o sample model td error: %05f' % model_tderr)
+        logger.info('h/o sample lstd td error: %05f' % lstd_tderr)
+        
 
-        return {'td-error0': model_err0,
-                'td-error1': model_err1,
-                'lstd0-error0': lstd0_err0,
-                'lstd1-error0': lstd1_err0,
-                'lstd0-error1': lstd0_err1,
-                'lstd1-error1': lstd1_err1,
-                'reward-error': model_rerr, 
-                'transition-error': model_zerr,
-                'target-error': target_err}
+        return {'model-td': model_tderr,
+                'lstd-td': lstd_tderr}
 
-    def td_error(v, r, all_steps = True):
-        ntot = 0
-        los = 0.
-        for i in xrange(1, len(r) if all_steps else 2):
-            hh = len(r[i:])
-            M = numpy.zeros((len(r), hh))
-            for j in xrange(hh):
-                M[j:j+i, j] = gam**numpy.arange(i)
-
-            acc_r = numpy.dot(r, M)
-            los += numpy.sum((acc_r + gam**i * v[i:] - v[:-i])**2) 
-            ntot += hh
-
-        return los / ntot
-
-    def print_param_norms():
-        phi_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
-        T_norms = numpy.apply_along_axis(numpy.linalg.norm, 0, model.T)
-        logger.info('average Phi column norm: ' + str(numpy.average(phi_norms)))
-        logger.info('average T column norms: ' + str(numpy.average(T_norms)))
-        logger.info('q norm: ' + str(numpy.linalg.norm(model.q)))
-    
-    
     logger.info('constructing world and feature map')
-    #world = rsis.CircleWorld(gam = gam)
-    world = rsis.TorusWorld()
-    #fmap = rsis.FourierFeatureMap(N)
-    fmap = rsis.TileFeatureMap(N**2)
+    world = rsis.CircleWorld(gam = gam)
+    #world = rsis.TorusWorld()
+    fmap = rsis.FourierFeatureMap(N)
+    #fmap = rsis.TileFeatureMap(N**2)
 
     logger.info('dimension of raw features: ' + str(fmap.d))
 
  
     logger.info('constructing theano model')
     t = time.time()
-    model = rsis.QR_RSIS(fmap.d, k, h, l1=l1, l2=l2, shift=shift)
+    model = rsis.LowRankLSTD(fmap.d, k, gam, l1=l1, l2d=l2d, l2k=l2k)
     logger.info('time to compile model: ' + str(time.time() - t))
-    
-    losses = collections.OrderedDict(
-                    [
-                    ('mulistep likelihood', (model.optimize_loss, model.optimize_grad, model.all_params, model.all_params_t)),
-                    #('model', (model.optimize_model_loss, model.optimize_model_grad, model.model_params, model.model_params_t)),
-                    ])
-    
     
     X_test, R_test = sample_circle_world(10000, seed=0)
 
-    lstd0 = rsis.LSTD(fmap.d, all_steps = False)
-    lstd1 = rsis.LSTD(fmap.d, all_steps = True)
     loss_values = []
     it = 0
     try:
@@ -201,53 +144,32 @@ def main(
             
             X, R = sample_circle_world(n)
 
-            # collect feature statistics for use w/ lstd 
-            lstd0.update_params(X, R)
-            lstd1.update_params(X, R)
+            model.update_statistics(X, R)
 
-            for key, val in losses.items():
-                
-                opt_loss, opt_grad, wrt, wrt_t = val
+            t = time.time()
+            model.set_params(
+                scipy.optimize.fmin_cg(
+                    model.optimize_loss,
+                    model.flat_params,
+                    model.optimize_grad,
+                    args=(X, R),
+                    full_output=False,
+                    maxiter=max_iter)
+            )
+            logger.info('time for cg iteration: %f' % (time.time()-t))
+            
+            print 'Phi norms: ',numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
+             
+            if it % 10 == 0:
+                plot_learned(N)
 
+            loss_values.append(evaluate(X_test, R_test))
 
-                logger.info('descending %s loss' % key)
-
-                #model.set_wrt(wrt, wrt_t)
-
-                t = time.time()
-                model.set_params(
-                    scipy.optimize.fmin_cg(
-                        opt_loss,
-                        model.flat_params,
-                        opt_grad,
-                        args=(X, R),
-                        full_output=False,
-                        maxiter=max_iter)
-                )
-                logger.info('time for cg iteration: %f' % (time.time()-t))
-                
-                                
-                #model.qr_step()
-                #loss_values.append(evaluate(X_test, R_test))                
-                print_param_norms()
-                 
-                if it % 10 == 0:
-                    plot_learned(N)
-
-                loss_values.append(evaluate(X_test, R_test))
-
-                
     except KeyboardInterrupt:
-        logger.info( '\n user stopped current training loop')
+        logger.info('\n user stopped current training loop')
     
     timestamp = str(datetime.datetime.now()).replace(' ','.').replace(':','.')
 
-    logger.info('final q: ' + str(model.q))
-    logger.info('final w: ' + str(model.w))
-    
-    logger.info('norm of model weights: %05f' % numpy.sum(numpy.dot(model.Phi, model.w)**2))
-    logger.info('norm of lstd0 weights: %05f' % numpy.sum(lstd0.get_weights()**2))
-    logger.info('norm of lstd1 weights: %05f' % numpy.sum(lstd1.get_weights()**2))
 
     plot_learned(N)
 
@@ -261,24 +183,11 @@ def main(
         plt.clf()
 
         for c in df.columns:
-
+            
             y = df[c].values
+            plt.semilogy(numpy.arange(1, len(y)+1), y, label = c)
 
-            if c in ['transition-error', 'reward-error', 'target-error']:
-                plt.subplot(311)
-                plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
-                #plt.ylim([0,numpy.max(df['transition-error'].values)])
-            if 'td' in c:
-                plt.subplot(312)
-                plt.semilogy(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
-                #plt.ylim([0, numpy.max(df['transition-error'].values)])
-            if 'lstd1' in c:
-                plt.subplot(313)
-                plt.plot(numpy.arange(1,len(y)+1), y, label = c.replace('-error',''))
-    
-        plt.subplot(311); plt.legend()
-        plt.subplot(312); plt.legend()
-        plt.subplot(313); plt.legend()
+        plt.legend()
         plt.savefig('plots/loss-curve%s.png' % timestamp)
 
     def plot_value_rew():
@@ -287,24 +196,21 @@ def main(
         X = fmap.transform(P)
         R = world.reward_func(P) # true reward function
         
-        lstd_val0 = lstd0.get_value(X)
-        lstd_val1 = lstd1.get_value(X)        
-        model_val = model.value_func(X, gam)
-        #model_lstd_val = model.lstd_value_func(x, r, gam, X) # XXX replace with lstd object statistics, add closest reward fn - projected LSTD
+        model_val, lstd_val = model.get_values(X)
         
-        lstd0_rew = lstd0.get_reward(X)
-        lstd1_rew = lstd1.get_reward(X)
-        model_rew = model.reward_func(X)
-        value_list = [model_val, lstd_val0, lstd_val1]
+        #model_rew = model.reward_func(X)
+        value_list = [model_val, lstd_val]
         
         if hasattr(world, 'value_func'):
             value_list.append(world.value_func(P))
 
-        plot_filters(numpy.vstack([model_rew, lstd0_rew, lstd1_rew, R]).T, (1, 4), file_name='plots/rewards%s.png' % timestamp)
+        #plot_filters(numpy.vstack([model_rew, lstd0_rew, lstd1_rew, R]).T, (1, 4), file_name='plots/rewards%s.png' % timestamp)
         plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values%s.png' % timestamp)
 
     plot_value_rew()    
     plot_loss_curve()
+    logger.info('norm of model weights: %05f' % numpy.sum(numpy.dot(model.Phi, model.u)**2))    
+    logger.info('norm of lstd weights: %05f' % numpy.sum(model.w**2))  
 
 
 if __name__ == '__main__':
