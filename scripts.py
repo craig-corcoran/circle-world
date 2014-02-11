@@ -13,17 +13,11 @@ import rsis
 
 logger = rsis.get_logger(__name__)
 
-# natural gradient
 # check for sign changes and set to zero when using l1
 # thorough hyperparameter search: fancy hill climbing?
 # see if learning is stable if the model is initialized to the true model values
-# regularize when solving for w using P and q
-
-# performance measure: calculate TD error on sample set
-# solve for value function in torus world, include reward loss function
-# plot bellman error, components, and target loss over time (train + test)
-# include z loss, horizon? alternating with reward horizon loss?
-# compare to TD(0) (lambda?), lstd
+# plot bellman error components, and target loss over time (train + test)
+# compare to TD(0) (lambda?) 
 # plot distribution from rolling the learned/true model out through time
 
 def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
@@ -65,11 +59,11 @@ def main(
         batches = 30, # number of iterations to run cg for
         n = 1000, # number of samples per minibatch
         N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
-        k = 4,  # number of compressed features, Phi is [dxk]
+        k = 16,  # number of compressed features, Phi is [dxk]
         max_iter = 3, # max number of cg optimizer steps per iteration
-        l1 = 4e-4,
-        l2d = 1e-2,
-        l2k = 1e-3
+        l1 = 1e-12,
+        l2d = 1e-12,
+        l2k = 1e-12,
         gam = 1-1e-2,
         ):
 
@@ -106,8 +100,8 @@ def main(
         if x_test is None:
             x_test, r_test = sample_circle_world(4*n)
 
-        model_tderr = model.loss(x_test, r_test)
-        lstd_tderr = model.lstd_loss(x_test, r_test)
+        model_tderr = model.td_error(model.get_model_value(x_test), r_test)
+        lstd_tderr = model.td_error(model.get_lstd_value(x_test), r_test) 
         
         #model_rerr = model.reward_error(x_test, r_test) / n
         #model_zerr = model.transition_error(x_test) / (n-1)
@@ -120,10 +114,10 @@ def main(
                 'lstd-td': lstd_tderr}
 
     logger.info('constructing world and feature map')
-    world = rsis.CircleWorld(gam = gam)
-    #world = rsis.TorusWorld()
-    fmap = rsis.FourierFeatureMap(N)
-    #fmap = rsis.TileFeatureMap(N**2)
+    #world = rsis.CircleWorld(gam = gam)
+    world = rsis.TorusWorld()
+    #fmap = rsis.FourierFeatureMap(N)
+    fmap = rsis.TileFeatureMap(N**2)
 
     logger.info('dimension of raw features: ' + str(fmap.d))
 
@@ -133,7 +127,7 @@ def main(
     model = rsis.LowRankLSTD(fmap.d, k, gam, l1=l1, l2d=l2d, l2k=l2k)
     logger.info('time to compile model: ' + str(time.time() - t))
     
-    X_test, R_test = sample_circle_world(10000, seed=0)
+    X_test, R_test = sample_circle_world(10000) #, seed=0)
 
     loss_values = []
     it = 0
@@ -178,16 +172,20 @@ def main(
     
     def plot_loss_curve():
         
-        # add line for td error of the true value function 
+        # XXX add line for td error of the true value function 
 
         plt.clf()
-
-        for c in df.columns:
-            
+        
+        n_cols = len(df.columns)
+        for i, c in enumerate(df.columns):
             y = df[c].values
+            plt.subplot(n_cols, 1, i)
             plt.semilogy(numpy.arange(1, len(y)+1), y, label = c)
 
-        plt.legend()
+        for i in xrange(n_cols):
+            plt.subplot(n_cols, 1, i)
+            plt.legend()        
+        
         plt.savefig('plots/loss-curve%s.png' % timestamp)
 
     def plot_value_rew():
@@ -196,7 +194,8 @@ def main(
         X = fmap.transform(P)
         R = world.reward_func(P) # true reward function
         
-        model_val, lstd_val = model.get_values(X)
+        model_val = model.get_model_value(X) 
+        lstd_val = model.get_lstd_value(X)
         
         #model_rew = model.reward_func(X)
         value_list = [model_val, lstd_val]
@@ -216,4 +215,3 @@ def main(
 if __name__ == '__main__':
 
     rsis.script(main)
-    #view_fourier_basis()
