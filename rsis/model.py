@@ -6,6 +6,100 @@ import theano.sandbox.linalg.ops as LA
 
 theano.config.warn.subtensor_merge_bug = False
 
+
+class BKS_LSTD(object):
+    
+    ''' Bellman Krylov Subspace LSTD. Finds low-d krylov subspace, then solves
+    for the value function in this low-d space'''
+
+    def __init__(self,
+                d,
+                k,
+                h,
+                gam,  
+                l2d,
+                l2k,
+                ):
+
+        self.d = d
+        self.k = k
+        self.h = h
+        self.gam = gam
+        self.l2d = l2d
+        self.l2k = l2k
+
+        self.S = numpy.zeros((d,d))
+        self.Sp = numpy.zeros((d,d))
+        self.b = numpy.zeros(d)
+        self.A = numpy.zeros((self.d, self.d))
+
+        self.dshift = numpy.identity(d) * self.l2d
+        self.kshift = numpy.identity(k) * self.l2k
+        
+        self.Phi = None        
+        self.w = None
+        self.u = None
+        
+        self.updated = {'u':False, 'w':False}
+    
+    @property
+    def C(self):
+        return self.S - self.gam * self.Sp 
+
+    @property
+    def D(self):
+        return numpy.dot(numpy.dot(self.Phi.T, self.C), self.Phi)
+
+    @property
+    def a(self):
+        return numpy.dot(self.Phi.T, self.b)
+
+    def encode(self, x):
+        return numpy.dot(x, self.Phi)
+
+    def update_statistics(self, X, R):
+
+        self.S += numpy.dot(X[:-1].T, X[:-1])
+        self.Sp += numpy.dot(X[:-1].T, self.gam * X[1:])
+        self.b += numpy.dot(X[:-1].T, R[:-1])
+        
+        n_rows = min(self.h, X.shape[0])
+        Q = numpy.zeros((n_rows, self.d))
+        for i in xrange(n_rows):
+            # each row of Q is the inner product of r_t+i with x_t
+            Q[i,:] = numpy.dot(R[i:], X if i is 0 else X[:-i]) / len(R[i:])
+
+        self.A += numpy.dot(Q.T, Q) / n_rows
+        self.updated.update({'u':False, 'w':False})
+
+    def set_phi(self):
+        
+        vals, vecs = numpy.linalg.eigh(self.A)
+        vecs = vecs[:, numpy.argsort(vals)[::-1]]
+        self.Phi = vecs[:, :self.k]
+
+    def get_model_value(self, X):
+        
+        if not self.updated['u']:
+            self.set_phi()
+            self.u = scipy.linalg.solve(self.D + self.kshift, self.a)
+            self.updated['u'] = True
+
+        return numpy.dot(self.encode(X), self.u)
+
+    def get_lstd_value(self, X):
+
+        if not self.updated['w']:
+            self.w = scipy.linalg.solve(self.C + self.dshift,  self.b)
+            self.updated['w'] = True
+
+        return numpy.dot(X, self.w)
+
+    def td_error(self, v, r):
+        return numpy.sqrt(#min(numpy.sum((r[:-1])**2), 
+                              numpy.sum((r[:-1] + self.gam * v[1:] - v[:-1])**2))#)
+                                
+
 class LowRankLSTD(object):
     
     ''' low rank lstd maintains full base feature statistics X^T X, but projects
@@ -42,8 +136,8 @@ class LowRankLSTD(object):
 
         self.w = None # can solve for this upon value funct query
         self.u = None 
-        self.update_u = False
-        self.update_w = False
+        self.updated_u = False
+        self.updated_w = False
 
         self.Phi_t = TT.dmatrix('Phi')
         self.S_t = TT.dmatrix('S') # S = X^T X ; Sp = X^T Xp
@@ -80,7 +174,6 @@ class LowRankLSTD(object):
     @property
     def c(self):
         return numpy.dot(self.Phi.T, self.b)
-
         
     @property
     def C(self):
@@ -172,7 +265,7 @@ class LowRankLSTD(object):
         return TT.dot(x, self.Phi_t)
 
     def regularization_t(self):
-        return self.l1 * TT.sum(self.Phi_t**2) #  TT.sum(abs(self.Phi_t)) 
+        return self.l1 * TT.sum(self.Phi_t**2) #  TT.sum(abs(self.Phi_t)) s
 
     def get_args(self, params, X, R):
         params = params if (type(params) == list) else self._unpack_params(params)        

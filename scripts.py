@@ -114,8 +114,8 @@ def main(
                 'lstd-td': lstd_tderr}
 
     logger.info('constructing world and feature map')
-    #world = rsis.CircleWorld(gam = gam)
-    world = rsis.TorusWorld()
+    world = rsis.CircleWorld(gam = gam)
+    #world = rsis.TorusWorld()
     #fmap = rsis.FourierFeatureMap(N)
     fmap = rsis.TileFeatureMap(N**2)
 
@@ -124,12 +124,14 @@ def main(
  
     logger.info('constructing theano model')
     t = time.time()
-    model = rsis.LowRankLSTD(fmap.d, k, gam, l1=l1, l2d=l2d, l2k=l2k)
+    #model = rsis.LowRankLSTD(fmap.d, k, gam, l1=l1, l2d=l2d, l2k=l2k)
+    model = rsis.BKS_LSTD(fmap.d, k, n, gam, l2d, l2k)
     logger.info('time to compile model: ' + str(time.time() - t))
     
     X_test, R_test = sample_circle_world(10000) #, seed=0)
 
-    loss_values = []
+    loss_values = [evaluate(X_test, R_test)]
+
     it = 0
     try:
         for it in range(batches):
@@ -139,26 +141,27 @@ def main(
             X, R = sample_circle_world(n)
 
             model.update_statistics(X, R)
-
-            t = time.time()
-            model.set_params(
-                scipy.optimize.fmin_cg(
-                    model.optimize_loss,
-                    model.flat_params,
-                    model.optimize_grad,
-                    args=(X, R),
-                    full_output=False,
-                    maxiter=max_iter)
-            )
-            logger.info('time for cg iteration: %f' % (time.time()-t))
             
-            print 'Phi norms: ',numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
-             
+            #t = time.time()
+            #model.set_params(
+            #    scipy.optimize.fmin_cg(
+            #        model.optimize_loss,
+            #        model.flat_params,
+            #        model.optimize_grad,
+            #        args=(X, R),
+            #        full_output=False,
+            #        maxiter=max_iter)
+            #)
+            #logger.info('time for cg iteration: %f' % (time.time()-t))
+            
+            #print 'Phi norms: ',numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
+
+            loss_values.append(evaluate(X_test, R_test))
+ 
             if it % 10 == 0:
                 plot_learned(N)
 
-            loss_values.append(evaluate(X_test, R_test))
-
+            
     except KeyboardInterrupt:
         logger.info('\n user stopped current training loop')
     
@@ -179,11 +182,11 @@ def main(
         n_cols = len(df.columns)
         for i, c in enumerate(df.columns):
             y = df[c].values
-            plt.subplot(n_cols, 1, i)
+            #plt.subplot(n_cols, 1, i)
             plt.semilogy(numpy.arange(1, len(y)+1), y, label = c)
 
         for i in xrange(n_cols):
-            plt.subplot(n_cols, 1, i)
+            #plt.subplot(n_cols, 1, i)
             plt.legend()        
         
         plt.savefig('plots/loss-curve%s.png' % timestamp)
