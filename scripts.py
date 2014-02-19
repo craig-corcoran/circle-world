@@ -20,6 +20,16 @@ logger = rsis.get_logger(__name__)
 # compare to TD(0) (lambda?) 
 # plot distribution from rolling the learned/true model out through time
 
+# plot reward and transition error over time
+# crop beginning of plots (when weight norm is 0)
+# plot current reward function in each basis
+# record compute times of eig+solve and solve
+
+# do svd matrix inv and use k components for lstd comparison
+# add mean component to A matrix in model
+# force reward to be in initial sample
+# autoencoder loss version - recursive linear, randomized nonlinear
+
 def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
     plt.clf()
     side = numpy.sqrt(X.shape[0])
@@ -38,7 +48,6 @@ def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
                   #vmin = -lim, 
                   #vmax = lim,
                   interpolation = 'nearest')
-
     plt.savefig(file_name)
 
 
@@ -56,17 +65,16 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
 
 
 def main(
-        batches = 30, # number of iterations to run cg for
-        n = 1000, # number of samples per minibatch
+        batches = 50, # number of iterations to run cg for
+        n = 10, # number of samples per minibatch
         N = 20, # grid/basis resolution, num of fourier funcs. grid is [2Nx2N]
         k = 16,  # number of compressed features, Phi is [dxk]
         max_iter = 3, # max number of cg optimizer steps per iteration
-        l1 = 1e-12,
-        l2d = 1e-12,
-        l2k = 1e-12,
+        l2d = 1e-15,
+        l2k = 1e-15,
         gam = 1-1e-2,
         ):
-
+    
     #os.system('rm plots/*.png')
     os.system('mv plots/*.png plots/old/')
     
@@ -91,7 +99,7 @@ def main(
         logger.info('plotting current features')
         P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
         X = fmap.transform(P)
-        Z = model.encode(X)
+        Z = model.encode(X)[:,::-1]
         l = int(numpy.sqrt(k)) # XXX
         tup = (l,k//l) if k > 2 else (1,k)
         plot_filters(Z, tup, 'plots/learned_basis_.%05d.png' % it)
@@ -99,16 +107,23 @@ def main(
     def evaluate(x_test = None, r_test = None):
         if x_test is None:
             x_test, r_test = sample_circle_world(4*n)
-
+        
+        ti = time.time()
         model_tderr = model.td_error(model.get_model_value(x_test), r_test)
-        lstd_tderr = model.td_error(model.get_lstd_value(x_test), r_test) 
+        logger.info('time for model: %05f' % (time.time() - ti))
+        
+        ti = time.time()
+        lstd_tderr = model.td_error(model.get_lstd_value(x_test, k), r_test) 
+        logger.info('time for lstd: %05f' % (time.time() - ti))
         
         #model_rerr = model.reward_error(x_test, r_test) / n
         #model_zerr = model.transition_error(x_test) / (n-1)
         
         logger.info('h/o sample model td error: %05f' % model_tderr)
         logger.info('h/o sample lstd td error: %05f' % lstd_tderr)
-        
+
+        logger.info('norm of model weights: %05f' % numpy.sum(numpy.dot(model.Phi, model.u)**2))    
+        logger.info('norm of lstd weights: %05f' % numpy.sum(model.w**2)) 
 
         return {'model-td': model_tderr,
                 'lstd-td': lstd_tderr}
@@ -122,15 +137,12 @@ def main(
     logger.info('dimension of raw features: ' + str(fmap.d))
 
  
-    logger.info('constructing theano model')
     t = time.time()
-    #model = rsis.LowRankLSTD(fmap.d, k, gam, l1=l1, l2d=l2d, l2k=l2k)
-    model = rsis.BKS_LSTD(fmap.d, k, n, gam, l2d, l2k)
-    logger.info('time to compile model: ' + str(time.time() - t))
+    model = rsis.BKS_LSTD(fmap.d, k, gam, l2d, l2k)
     
     X_test, R_test = sample_circle_world(10000) #, seed=0)
 
-    loss_values = [evaluate(X_test, R_test)]
+    loss_values = [] # [evaluate(X_test, R_test)]
 
     it = 0
     try:
@@ -142,20 +154,6 @@ def main(
 
             model.update_statistics(X, R)
             
-            #t = time.time()
-            #model.set_params(
-            #    scipy.optimize.fmin_cg(
-            #        model.optimize_loss,
-            #        model.flat_params,
-            #        model.optimize_grad,
-            #        args=(X, R),
-            #        full_output=False,
-            #        maxiter=max_iter)
-            #)
-            #logger.info('time for cg iteration: %f' % (time.time()-t))
-            
-            #print 'Phi norms: ',numpy.apply_along_axis(numpy.linalg.norm, 0, model.Phi)
-
             loss_values.append(evaluate(X_test, R_test))
  
             if it % 10 == 0:
