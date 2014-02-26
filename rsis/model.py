@@ -14,12 +14,12 @@ class Base_LSTD(object):
     def __init__(self,
                 d,
                 gam,  
-                l2_lstd,
+                l2_lstd = 1e-4,
                 ):
     
         self.d = d        
         self.gam = gam
-        self.l2_lstd = l2_std
+        self.l2_lstd = l2_lstd
 
         self.S = numpy.zeros((self.d,self.d))
         self.Sp = numpy.zeros((self.d,self.d))
@@ -33,13 +33,18 @@ class Base_LSTD(object):
     def C(self):
         return self.S - self.gam * self.Sp
     
-    def update_statistics(self, X, R, reset_trace = False):
+    def update_statistics(self, X, R, reset = False):
+        
+        if reset:
+            self.S = numpy.zeros(self.S.shape)
+            self.Sp = numpy.zeros(self.Sp.shape)
+            self.b = numpy.zeros(self.n.shape)
 
         self.S += numpy.dot(X[:-1].T, X[:-1])
         self.Sp += numpy.dot(X[:-1].T, self.gam * X[1:])
         self.b += numpy.dot(X[:-1].T, R[:-1])
         
-        self.updated.update({'w':False})
+        self.updated['w'] = False
 
     def get_lstd_value(self, X, k = None):
 
@@ -47,8 +52,8 @@ class Base_LSTD(object):
             
             if k:
                 u,d,v = scipy.sparse.linalg.svds(self.C + self.lstd_shift, k=self.k, which='LM')
-                c_inv = numpy.dot(numpy.dot(v.T, numpy.diag(1/d)), u.T) # XXX plot svd features
-                self.w = numpy.dot(c_inv, self.b)
+                c_inv = numpy.dot(numpy.dot(v.T, numpy.diag(1./d)), u.T) # XXX plot svd features
+                self.w = numpy.dot(c_inv, self.b)   
             else:
                 self.w = scipy.linalg.solve(self.C + self.lstd_shift,  self.b)
             
@@ -60,106 +65,115 @@ class Base_LSTD(object):
         return numpy.sqrt(numpy.sum((r[:-1] + self.gam * v[1:] - v[:-1])**2))
 
 class Reconstructive_LSTD(Base_LSTD):
-    
+        
     ''' uses rica-like loss to learn a representation that captures the subspace
     spanned by r_t, r_t+1, ... '''
 
     def __init__(self, *args, **kwargs):
         
-        self.k = args[0] #  number of columns of U
+        self.k = args[0] #  number of columns of W
+        
         self.states = kwargs.pop('states') # full state/reward sequence, subsampled during learning
         self.rewards = kwargs.pop('rewards')
+        
         self.n = kwargs.pop('n', 100) # size of 'image' (subsample from statespace) input into encoding
         self.m = kwargs.pop('m', 100) # size of minibatch: number of images used for estimating gradient
-        self.l2_subs = kwargs.pop('l2_subs', 1e-3) # l2 regularization when doing lstd on the subspace of U
-        self.l2_loss = kwargs.pop('l2_loss', 1e-3) # l2 regularization of U with reconstructive loss
-        self.eps = kwargs.pop('eps', 1e-4) # used to determine the horizon h w/ gam
-        self.g = kwargs.pop('g', lambda x: x) # encoding transformation (default is identity)
-
-        super(Reconstructive_LSTD, self).__init__(*args[1:-2], **kwargs)
         
-        self.h = int(numpy.log(self.eps) / numpy.log(self.gam)) # determine horizon where gam^h < eps
+        self.reg_loss = kwargs.pop('reg_loss', ('l2',1e-4)) # l2 regularization of W with reconstructive loss
+        self.l2_subs = kwargs.pop('l2_subs', 1e-4) # l2 regularization when doing lstd on the subspace of W
         self.subs_shift = numpy.identity(self.k) * self.l2_subs
-        self.U = numpy.zeros((self.d, self.k))
         
-        self.U_t = TT.dmatrix('U')
-        self.X_t = TT.dtensor3('X')
-        self.R_t = TT.dmatrix('R')
+        self.g = kwargs.pop('g', lambda x: x) # encoding transformation (default is identity)
+        init_scale = kwargs.pop('init_scale', 1e-4)
+        self.eps = kwargs.pop('eps', 1e-4) # used to determine the horizon h w/ gam
+        max_h = kwargs.pop('max_h', None)
 
+        super(Reconstructive_LSTD, self).__init__(*args[1:], **kwargs)
+
+        self.W = init_scale*numpy.random.randn(self.d, self.k)
+        self.n_samples = len(self.rewards)
+        horiz = int(numpy.log(self.eps) / numpy.log(self.gam)) # determine horizon where gam^h < eps
+        self.h = min(horiz, max_h) if max_h else horiz 
+                
+        self.W_t = TT.dmatrix('W')
+        self.X_t = TT.dtensor3('X')
+        self.R_t = TT.dmatrix('R') # broadcastable
+
+        self.compile_theano_funcs()
+        self.update_statistics(self.states, self.rewards)
+        self.updated['u'] = False
+
+    def encode(self, x):
+        return self.g(numpy.dot(x, self.W))
 
     def compile_theano_funcs(self): 
-        loss = self.loss_t()
-        self.theano_loss = theano.function([self.U_t, self.X_t, self.R_t], 
-                                    loss + self.l2_loss * TT.sum(self.U_t**2)) # on_unused_input='ignore')
+        reg_str, reg_val = self.reg_loss
+        if reg_str == 'l2':        
+            reg =  TT.sum(self.W_t**2)
+        elif reg_str == 'l1':
+            reg = TT.sum(abs(self.W_t))
+        else: assert False
+        loss = self.loss_t() + reg_val * reg
+        loss_vars = [self.W_t, self.X_t, self.R_t]
+        self.theano_loss = theano.function(loss_vars, loss) # on_unused_input='ignore')
 
-        grad = theano.grad(loss, self.U_t) # , disconnected_inputs='ignore'
+        grad = theano.grad(loss, self.W_t) # , disconnected_inputs='ignore'
         self.theano_grad = theano.function(loss_vars, grad) # on_unused_input='ignore')
 
-    def reconstruction_loss_t(self, X, r):
-        '''reconstruction loss for a single vector r: ||W g(W^T r) - r||^2 '''
-
-        W = TT.dot(X.T, self.U_t) 
-        return TT.sum((TT.dot(W, self.g(TT.dot(W.T, r))) - r)**2)
-
     def loss_t(self):
-        ''' accumulate reconstruction loss across a minibatch '''
-        return theano.scan(
-                        fn=lambda loss, x, r: loss + self.reconstruction_loss_t(x,r),
-                        outputs_info=0.,
-                        sequences=[self.X_t, self.R_t]
-                        )[0][-1] 
+        # equiv to sum_i || Xi^T W g( W^T Xi r_i) - r_i ||^2
+        H = self.g(TT.sum(TT.tensordot(self.W_t.T, self.X_t, 1) * self.R_t, axis=2)) # kxm matrix of hidden unit activations
+        I = TT.dot(self.W_t, H).T # H is [k,m]; W is [d,k]; I is [m,d]
+        Rhat = TT.sum(TT.mul(self.X_t.T, I), axis=2).T
+        return TT.sum((Rhat - self.R_t)**2)
 
-    def optimize_loss(self, params, X, R):
-        return self.theano_loss(self.get_args(params, X, R))
+    def get_model_value(self, X):
+        
+        if not self.updated['u']:
+            Z = self.encode(self.states)
+            C = numpy.dot(Z[:-1].T, (Z[:-1] - self.gam * Z[1:]))
+            b = numpy.dot(Z.T, self.rewards)
+            self.u = scipy.linalg.solve(C + self.subs_shift,  b)
+            self.updated['u'] = True
 
-    def optimize_grad(self, params, X, R):
-        grad = self.theano_grad(*self.get_args(params, X, R))
-        return self._flatten(grad)
+        return numpy.dot(self.encode(X), self.u)
+
+    def optimize_loss(self, w, X, R):
+        W = numpy.reshape(w, (self.d, self.k))
+        return self.theano_loss(W, X, R)
+
+    def optimize_grad(self, w, X, R):
+        W = numpy.reshape(w, (self.d, self.k))
+        grad = self.theano_grad(W, X, R)
+        return grad.flatten()
+
+    def set_params(self, w):
+        self.W = numpy.reshape(w, (self.d, self.k))
+        self.updated['u'] = False
 
     def sample_minibatch(self):
         ''' sample a minibatch of reward images. each image is a random
         subsample of the state space with a constant temporal offset between
         the reward r and the corresponding state x '''
+            
+        x = numpy.empty((self.m, self.n, self.d)) 
+        r = numpy.empty((self.m, self.n)) 
+        for i in xrange(self.m): 
+            x[i], r[i] = self.sample_image(self.n)
         
-        x = numpy.empty((self.m, self.n, self.d)) r = numpy.empty((self.m,
-        self.n)) for i in xrange(m): x[i], r[i] = self.sample_image(self.n)
-
+        x = numpy.rollaxis(x, 2) # makes x [dxmxn]
         return x, r
 
     def sample_image(self, n):
         ''' picks a random time step difference, then randomly subsamples from
         the available samples (with replacement) '''
         i = numpy.random.randint(self.h+1) # XXX weight prob by gam**i? 
-        t = numpy.random.randint(n-i+1, size=n) # ok to sample with replacement?
+        assert i < self.n_samples
+        t = numpy.random.randint(self.n_samples-i, size=n) # ok to sample with replacement?
         x = self.states[t]
         r = self.rewards[t+i]
 
         return x, r
-
-
-class RICA_LSTD(Base_LSTD):
-    
-    ''' linear reconstructive LSTD. First learns a subspace U and does l2 
-    regularized LSTD in this space '''
-
-    def __init__(self, *args, **kwargs):
-
-        super(RICA_LSTD, self).__init__(*args[1:-1], **kwargs)
-
-        self.k = args[0]
-        self.l2_rica = args[-1]
-        self.rica_shift = numpy.identity(self.k) * self.l2_rica
-        self.U = numpy.zeros(self.d, self.k)
-        self.l = 0c
-        self.X_t = TT.dmatrix('X') # X and R for error
-        self.R_t = TT.dvector('R')
-       
-        self.Z_t =  
-
-    def loss_t(self):
-
-        pass # XXX theano recursive/cumulative loss
-
 
 
 class BKS_LSTD(object):
@@ -220,9 +234,6 @@ class BKS_LSTD(object):
 
         return numpy.dot(self.encode(X), self.u)
 
-
-    # RICA / Autoencoder loss version
-                                
 
 class LowRankLSTD(object):
     
