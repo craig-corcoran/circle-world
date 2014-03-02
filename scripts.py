@@ -8,27 +8,11 @@ import pandas
 import scipy.optimize
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import theano
+import theano.tensor as TT
 import rsis
 
-
 logger = rsis.get_logger(__name__)
-
-# check for sign changes and set to zero when using l1
-# thorough hyperparameter search: fancy hill climbing?
-# see if learning is stable if the model is initialized to the true model values
-# plot bellman error components, and target loss over time (train + test)
-# compare to TD(0) (lambda?) 
-# plot distribution from rolling the learned/true model out through time
-
-# plot reward and transition error over time
-# crop beginning of plots (when weight norm is 0)
-# plot current reward function in each basis
-# record compute times of eig+solve and solve
-
-# do svd matrix inv and use k components for lstd comparison
-# add mean component to A matrix in model
-# force reward to be in initial sample
-# autoencoder loss version - recursive linear, randomized nonlinear
 
 def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
     plt.clf()
@@ -50,7 +34,6 @@ def plot_filters(X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
                   interpolation = 'nearest')
     plt.savefig(file_name)
 
-
 def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
                        shuffle = False, last = False):
     # plot a regular grid
@@ -64,25 +47,14 @@ def view_fourier_basis(N = 15, n_sp1 = 16, n_sp2 = 14,
     plot_filters(X, (n_sp1, n_sp2), 'plots/fourier_basis.png', last)
 
 
-# increase sample size incrementally
-# crossvalidation
-# run multiple experiments and plot avg and error bars
-# calculate, plot reward and transition error 
-# plot resulting reward and value functions
-# hypderparameter optimization
-
-# to vary: d, p, k
-
-
 class LSTD_Experiment(object):
     
     def __init__(self,
-                b = 50, # number of batches / iterations to run cg for
                 p = 2000, # total number of samples used for learning
                 n = 100, # dimension of each image
                 m = 100, # number of samples per minibatch
-                d = 400, # dimension of base feature representation
-                k = 16,  # number of compressed features, W is [dxk]
+                d = 500, # dimension of base feature representation
+                k = 16,  # number of compressed features, U is [dxk]
                 max_iter = 3, # max number of cg optimizer steps per iteration
                 max_h = 1000, # max horizon
                 l2_lstd = 1e-15,
@@ -90,9 +62,10 @@ class LSTD_Experiment(object):
                 reg_loss = ('l2',1e-3),
                 gam = 1-1e-2,
                 world = 'torus',
+                seed = None,
+                g = (lambda x: x,)*2,
                 ):
 
-        self.b = b
         self.p = p
         self.n = n
         self.m = m
@@ -101,19 +74,23 @@ class LSTD_Experiment(object):
         self.max_iter = max_iter
 
         self.world = rsis.TorusWorld() if world is 'torus' else rsis.CircleWorld(gam=gam)
-        self.fmap = rsis.TileFeatureMap(d)
+        self.fmap = rsis.TileFeatureMap(d) # XXX seed for tile features
         
         N = int(numpy.sqrt(d))
-        P = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
-        self.Im = self.fmap.transform(P) # generate a regular grid for plotting
+        self.grid = numpy.reshape(numpy.mgrid[-1:1:N*1j,-1:1:N*1j], (2,N*N)).T
+        self.Im = self.fmap.transform(self.grid) # generate a regular grid for plotting
         self.it = 0
 
         self.timestamp = str(datetime.datetime.now()).replace(' ','.').replace(':','.')
         self.loss_values = []
-        self.loss_df = None
+        self._loss_df = None
 
-        self.X_test, self.R_test = self.sample_world(p) #, seed=0)
-        X_data, R_data = self.sample_world(p)
+        self.X_test, self.R_test = self.sample_world(p, seed=seed)
+        X_data, R_data = self.sample_world(p, seed+1 if seed else None)
+
+        logger.info("average test reward: " + str(numpy.mean(self.R_test)))
+        logger.info("average train reward: " + str(numpy.mean(R_data)))
+    
         self.model = rsis.Reconstructive_LSTD(k, d, gam, 
                                     states=X_data, 
                                     rewards=R_data, 
@@ -122,8 +99,8 @@ class LSTD_Experiment(object):
                                     reg_loss=reg_loss,
                                     l2_lstd=l2_lstd,
                                     l2_subs=l2_subs,
-                                    max_h=max_h) 
-
+                                    max_h=max_h,
+                                    g=g) 
 
     def sample_world(self, n, seed=None):
         P, R = self.world.get_samples(n, seed=seed)
@@ -136,7 +113,7 @@ class LSTD_Experiment(object):
         Z = self.model.encode(self.Im)[:,::-1]
         l = int(numpy.sqrt(self.k))         
         tup = (l,self.k//l) if self.k > 2 else (1,self.k)
-        plot_filters(Z, tup, 'plots/learned_basis_.%i.png' % self.it)
+        plot_filters(Z, tup, 'plots/learned_basis%i.png' % self.it)
 
     def plot_filters(self, X, (n_sp1, n_sp2), file_name = 'basis.png', last = False):
         plt.clf()
@@ -158,118 +135,189 @@ class LSTD_Experiment(object):
                       interpolation = 'nearest')
         plt.savefig(file_name)
 
-
-    def evaluate(self, x_test=None, r_test=None):
+    def evaluate_lstd(self, x_test=None, r_test=None, k = None):
         
         x_test = x_test if x_test else self.X_test
         r_test = r_test if r_test else self.R_test
 
-        model_tderr = self.model.td_error(self.model.get_model_value(x_test), r_test)
-        lstd_tderr = self.model.td_error(self.model.get_lstd_value(x_test), r_test) 
-        
-        #model_rerr = self.model.reward_error(x_test, r_test) / n
-        #model_zerr = self.model.transition_error(x_test) / (n-1)
-        
-        logger.info('h/o sample model td error: %05f' % model_tderr)
-        logger.info('h/o sample lstd td error: %05f' % lstd_tderr)
+        tderr = self.model.td_error(self.model.get_lstd_value(x_test, k=k), r_test) 
+        rerr = self.model.lstd_reward_error(x_test, r_test, k=k)
+        zerr = self.model.lstd_transition_error(x_test, k=k)
 
-        logger.info('norm of model weights: %05f' % numpy.sum(numpy.dot(self.model.W, self.model.u)**2))    
-        logger.info('norm of lstd weights: %05f' % numpy.sum(self.model.w**2)) 
+        logger.info('h/o sample lstd td error: %05f' % tderr)
+        logger.info('norm of lstd weights: %05f' % numpy.sum(self.model.w_k**2)) 
+        
+        pref = 'k-' if k else ''
+        self.loss_values.append({pref + 'lstd-td': tderr, 
+                                 pref + 'lstd-rerr': rerr,
+                                 pref + 'lstd-trans': zerr,
+                                 'iter': self.it})
 
-        self.loss_values.append({'model-td': model_tderr, 
-                                 'lstd-td': lstd_tderr,
-                                 'iter': self.it })
-        self.loss_df = None # reset loss df to be rebuilt
+        self._loss_df = None # reset loss df to be rebuilt
+
+
+    def evaluate_model(self, x_test=None, r_test=None):
+        
+        x_test = x_test if x_test else self.X_test
+        r_test = r_test if r_test else self.R_test
+
+        tderr = self.model.td_error(self.model.get_model_value(x_test), r_test)  
+        rerr = self.model.model_reward_error(x_test, r_test) 
+        zerr = self.model.model_transition_error(x_test)
+        
+        logger.info('h/o sample model td error: %05f' % tderr)
+        logger.info('norm of model weights: %05f' % numpy.sum(numpy.dot(self.model.U, self.model.wz)**2))    
+
+        self.loss_values.append({'model-td': tderr, 
+                                 'model-rerr': rerr,
+                                 'model-trans': zerr,
+                                 'iter': self.it})
+
+        self._loss_df = None # reset loss df to be rebuilt
 
     
-    def train_model(self, b = None, evaluate = False):
+    def train_model(self, evaluate = False):
+     
+        logger.info('*** training iteration ' + str(self.it) + '***')
+        
+        X, R = self.model.sample_minibatch() 
+            
+        self.model.set_params(
+            scipy.optimize.fmin_cg(
+                self.model.optimize_loss,
+                self.model.U.flatten(),
+                self.model.optimize_grad,
+                args=(X, R),
+                full_output=False,
+                maxiter=self.max_iter
+                )
+            )
 
-        b = b if b else self.b
-        try:
-            for i in xrange(b):
-                
-                logger.info('*** iteration ' + str(self.it) + '***')
-                
-                X, R = self.model.sample_minibatch() 
-                    
-                self.model.set_params(
-                    scipy.optimize.fmin_cg(
-                        self.model.optimize_loss,
-                        self.model.W.flatten(),
-                        self.model.optimize_grad,
-                        args=(X, R),
-                        full_output=False,
-                        maxiter=self.max_iter
-                        )
-                    )
+        if evaluate:
+            self.evaluate_model()
 
-                if evaluate:
-                    self.evaluate()
-
-                self.it += 1
-                 
-        except KeyboardInterrupt:
-            logger.info('\n user stopped current training loop')
+        self.it += 1
+                     
+    @property
+    def loss_df(self): 
+        if self._loss_df is None:   
+            self._loss_df = pandas.DataFrame(self.loss_values)
+            self._loss_df.sort('iter', inplace=True)
+        
+        return self._loss_df
 
     def save_csv(self):
-        if self.loss_df is None:
-            self.loss_df = pandas.DataFrame(self.loss_values)
         self.loss_df.to_csv('data/losses%s.csv' % self.timestamp)
 
     def plot_loss_curve(self):
         
-        self.loss_df = pandas.DataFrame(self.loss_values)
-
         # XXX add line for td error of the true value function 
         plt.clf()
-        n_cols = len(self.loss_df.columns)
         for i, c in enumerate(self.loss_df.columns):
-            if not (c == 'iter'):
-                y = self.loss_df[c].values
-                #plt.subplot(n_cols, 1, i)
+
+            y = self.loss_df[c].values
+            n = len(y)
+            y = y[numpy.invert(numpy.isnan(y))]
+            if len(y) == 1: 
+                y = y * numpy.ones(n-2)
+                
+            if 'rerr' in c: 
+                plt.subplot(3,1,1)
                 plt.plot(numpy.arange(1, len(y)+1), y, label = c)
 
-        #for i in xrange(n_cols):
-            #plt.subplot(n_cols, 1, i)
-        plt.legend()        
+            elif 'trans' in c:
+                plt.subplot(3,1,2)
+                plt.plot(numpy.arange(1, len(y)+1), y, label = c)
+
+            elif ('-td' in c) or ('model' in c):
+                plt.subplot(3,1,3)
+                plt.plot(numpy.arange(1, len(y)+1), y, label = c)
+
+        for i in xrange(3):
+            plt.subplot(3, 1, i+1)
+            plt.legend()        
         
         plt.savefig('plots/loss-curve%s.png' % self.timestamp)
 
+    def plot_value_rew():
+        
+        model_val = model.get_model_value(self.Im) 
+        lstd_val = model.get_lstd_value(self.Im)
+        k_lstd_val = model.get_lstd_value(self.Im, k=self.k)
+        
+        world_rew = world.reward_func(self.grid) # true reward function
+        model_rew = model.reward_func(X)
+        value_list = [model_val, lstd_val]
+        
+        if hasattr(world, 'value_func'):
+            value_list.append(world.value_func(P))
+
+        #plot_filters(numpy.vstack([model_rew, lstd0_rew, lstd1_rew, R]).T, (1, 4), file_name='plots/rewards%s.png' % timestamp)
+        plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values%s.png' % timestamp)
+
+# show target loss (training and holdout data)
+# plot resulting reward and value functions
+# save experiment/model object after construction
+# td network with same architecture, similar samples / training
+# do crossvalidation and plot avg and error bars
+# hypderparameter optimization
+# plot distribution from rolling the learned/true model out through time
 
 def main(
-        b = 10, # number of batches / iterations to run cg for
+        b = 100, # number of batches / iterations to run cg for
         p = 2000, # total number of samples used for learning
-        n = 100, # dimension of each image
-        m = 100, # number of samples per minibatch
-        d = 1000, # dimension of base feature representation
-        k = 16,  # number of compressed features, W is [dxk]
+        n = 200, # dimension of each image
+        m = 200, # number of samples per minibatch
+        d = 200, # dimension of base feature representation
+        k = 20,  # number of compressed features, U is [dxk]
         max_iter = 3, # max number of cg optimizer steps per iteration
         max_h = 1000, # max horizon
-        l2_lstd = 1e-15,
-        l2_subs = 1e-15,
-        reg_loss = ('l2',1e-3),
+        l2_lstd = 1e-15, # reg used for full lstd
+        l2_subs = 1e-15, # reg used for subspace lstd
+        reg_loss = ('l1',1e-3),
         gam = 1-1e-2,
         world = 'torus',
+        seed = 0,
+        tran_func = 'sigmoid'
         ):
+    
+    losses = {
+        'relu': (lambda x: numpy.maximum(0,x), lambda x: TT.maximum(0,x)),
+        'softplus': (lambda x: numpy.log(1+numpy.exp(x)), lambda x: TT.log(1+TT.exp(x))),
+        'sigmoid': (lambda x: 1/(1+numpy.exp(x)), lambda x: 1/(1+TT.exp(x)))
+        }
+    g = losses[tran_func]
+
+    os.system('rm plots/*.png')
     
     logger.info("building experiment and model objects")
     experiment = LSTD_Experiment(
-                             b=b,p=p,n=n,m=m,d=d,k=k,
+                             p=p,n=n,m=m,d=d,k=k,
                              max_iter=max_iter, max_h=max_h,
                              l2_lstd=l2_lstd,l2_subs=l2_subs,reg_loss=reg_loss,
-                             gam=gam, world=world
+                             gam=gam, world=world, seed=seed, g=g,
                              )
 
-    logger.info("training model")
-    for i in xrange(5):
-        logger.info("batch %i" % i)
-        experiment.train_model(evaluate=True)
-        experiment.plot_learned()
-    
+    #experiment.evaluate_lstd()
+    experiment.evaluate_lstd(k=k)    
+    experiment.evaluate_model()
+    #experiment.plot_learned() # plot initial
+
+    logger.info("training and evaluating model")
+    try:
+        for i in xrange(b):
+            logger.info("batch %i" % i)
+            experiment.train_model(evaluate=True)
+
+    except KeyboardInterrupt:
+        logger.info('\n user stopped current training loop')
+
     logger.info("processing results")
     experiment.save_csv()
     experiment.plot_loss_curve()
-
+    experiment.plot_learned() # plot final
+    
+    # XXX plot value and reward functions
 
     #def plot_value_rew():
     #    
@@ -289,25 +337,7 @@ def main(
     #    #plot_filters(numpy.vstack([model_rew, lstd0_rew, lstd1_rew, R]).T, (1, 4), file_name='plots/rewards%s.png' % timestamp)
     #    plot_filters(numpy.vstack(value_list).T, (1, len(value_list)), file_name='plots/values%s.png' % timestamp)
 
-    #plot_value_rew()    
-
-def test_loss_working(k = 4, d = 400, n=1000, gam=1-1e-2):
-
-    world = rsis.CircleWorld(gam = gam)
-    P, R_data = world.get_samples(n)
-
-    fmap = rsis.TileFeatureMap(d)
-    X_data = fmap.transform(P)
-
-    model = rsis.Reconstructive_LSTD(k, d, gam, states=X_data, rewards=R_data) 
-    
-    X, R = model.sample_minibatch() 
-
-    print 'optimization loss: ', model.optimize_loss(model.W.flatten(), X, R)
-    print 'optimization grad norm: ', numpy.sum(model.optimize_grad(model.W.flatten(), X, R)**2)
-    
+    #plot_value_rew()        
 
 if __name__ == '__main__':
-    #view_fourier_basis()
-    #test_loss_working()
     rsis.script(main)

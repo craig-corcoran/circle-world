@@ -23,11 +23,16 @@ class TileFeatureMap(object):
     def __init__(self, N, size = 1.):
         s = size * np.exp(rng.uniform(-3, -0.5, size=N))
         s.sort()
+        
         cx = rng.uniform(-size, size, size=N)
         cy = rng.uniform(-size, size, size=N)
+        
+        cx[0] = cy[0] = 0 # make the first feature constant (center 0 w/ size 1 thus always on)
+        s[0] = 1.
+
         self.X1 = cx - s
-        self.Y1 = cy - s
         self.X2 = cx + s
+        self.Y1 = cy - s
         self.Y2 = cy + s
 
     def transform(self, P):
