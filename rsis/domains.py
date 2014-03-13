@@ -66,7 +66,7 @@ class CircleWorld(object):
 
 class TorusWorld(object):
 
-    def __init__(self, reward = 0.1, eps_z = 0.05, eps_R = 0., eps_T = 0.02):
+    def __init__(self, reward = 0.2, eps_z = 0.05, eps_R = 0., eps_T = 0.02):
         self.reward = reward
         self.eps_z = eps_z
         self.R = np.eye(2) + eps_R * rng.randn(2, 2)

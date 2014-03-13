@@ -87,7 +87,7 @@ class Base_LSTD(object):
     def get_lstd_value(self, X, k=None):
         if k:
             if not self.updated['w_k']:
-                u,d,v = scipy.sparse.linalg.svds(self.C + self.lstd_shift, k=self.k, which='LM')
+                u,d,v = scipy.sparse.linalg.svds(self.C + self.lstd_shift, k=k, which='LM')
                 c_inv = numpy.dot(numpy.dot(v.T, numpy.diag(1./d)), u.T) # XXX plot svd features
                 self.w_k = numpy.dot(c_inv, self.b)   
                 self.updated['w_k'] = True
@@ -155,6 +155,7 @@ class Reconstructive_LSTD(Base_LSTD):
     def __init__(self, *args, **kwargs):
         
         self.k = args[0] #  number of columns of U
+        self.n_layers = len(self.k)
         
         self.states = kwargs.pop('states') # full state/reward sequence, subsampled during learning
         self.rewards = kwargs.pop('rewards')
@@ -164,48 +165,67 @@ class Reconstructive_LSTD(Base_LSTD):
         
         self.reg_loss = kwargs.pop('reg_loss', ('l2',1e-4)) # l2 regularization of U with reconstructive loss
         self.l2_subs = kwargs.pop('l2_subs', 1e-4) # l2 regularization when doing lstd on the subspace of U
-        self.subs_shift = numpy.identity(self.k) * self.l2_subs
+        self.subs_shift = numpy.identity(self.k[-1]) * self.l2_subs
         
-        self.g, self.g_t = kwargs.pop('g', (lambda x: x,)*2) # encoding transformation (default is identity)
+        self.g, self.g_t, self.g_str = kwargs.pop('g', None) # encoding transformation (no default)
         init_scale = kwargs.pop('init_scale', 1e-4)
         self.eps = kwargs.pop('eps', 1e-4) # used to determine the horizon h w/ gam
         max_h = kwargs.pop('max_h', None)
 
         super(Reconstructive_LSTD, self).__init__(*args[1:], **kwargs)
-
-        self.U = init_scale*numpy.random.randn(self.d, self.k)
+        
+        self.sizes = (self.d,) + self.k
+        self.U = [init_scale*numpy.random.randn(self.sizes[i], self.sizes[i+1]) for i in xrange(self.n_layers)]
         self.n_samples = len(self.rewards)
         horiz = int(numpy.log(self.eps) / numpy.log(self.gam)) # determine horizon where gam^h < eps
         self.h = min(horiz, max_h) if max_h else horiz 
                 
-        self.U_t = TT.dmatrix('U')
+        self.U_t = [TT.dmatrix('U%i' % i) for i in xrange(self.n_layers)]
         self.X_t = TT.dtensor3('X')
         self.R_t = TT.dmatrix('R') # broadcastable
-        self.H_t = self.g_t(TT.sum(TT.tensordot(self.U_t.T, self.X_t, 1) * self.R_t, axis=2)) # kxm matrix of hidden unit activations
+        self.H_t = self.encode_t()
 
         self.compile_theano_funcs()
         self.update_statistics(self.states, self.rewards)
         self.reset_model_updated()
+
 
     def reset_model_updated(self):
         self.updated.update(
                     {'model-stats':False, 'wz':False, 'qz':False, 'Tz':False})
 
     def encode(self, x):
-        return self.g(numpy.dot(x, self.U))
+        for i in xrange(self.n_layers):
+            x = self.g(numpy.dot(x, self.U[i]))
+        return x
 
+    def encode_t(self):
+        H = [self.g_t(TT.sum(TT.tensordot(self.U_t[0].T, self.X_t, 1) * self.R_t, axis=2)).T] # mxk matrix of first layer hidden unit activations
+        for i in xrange(self.n_layers-1):
+            H.append(self.g_t(TT.dot(H[i], self.U_t[i+1])))
+        return H
+            
     def decode(self, z):
-        return numpy.dot(z, self.U.T)
-        
+        for i in xrange(self.n_layers):
+            z = numpy.dot(z, self.U[-(i+1)].T)    
+        return z
+
+    def decode_t(self):
+
+        I = TT.dot(self.H_t[-1], self.U_t[-1].T)
+        for U in self.U_t[:-1][::-1]: 
+            I = TT.dot(I, U.T)
+        return I
+
     def compile_theano_funcs(self): 
         reg_str, reg_val = self.reg_loss
         if reg_str == 'l2':        
             reg =  TT.sum(self.U_t**2)
         elif reg_str == 'l1':
-            reg = TT.sum(abs(self.H_t))
+            reg = TT.sum(abs(self.H_t[-1]))
         else: assert False
         loss = self.loss_t() + reg_val * reg
-        loss_vars = [self.U_t, self.X_t, self.R_t]
+        loss_vars = self.U_t + [self.X_t, self.R_t]
         self.theano_loss = theano.function(loss_vars, loss) # on_unused_input='ignore')
 
         grad = theano.grad(loss, self.U_t) # , disconnected_inputs='ignore'
@@ -213,22 +233,43 @@ class Reconstructive_LSTD(Base_LSTD):
 
     def loss_t(self):
         # equiv to sum_i || Xi^T U g( U^T Xi r_i) - r_i ||^2
-        I = TT.dot(self.U_t, self.H_t).T # H is [k,m]; U is [d,k]; I is [m,d]
+        I = self.decode_t() 
         Rhat = TT.sum(TT.mul(self.X_t.T, I), axis=2).T
-        return TT.sum((Rhat - self.R_t)**2)
+        return TT.sum((Rhat - self.R_t)**2) / (self.m * self.n)
 
     def optimize_loss(self, u, X, R):
-        U = numpy.reshape(u, (self.d, self.k))
-        return self.theano_loss(U, X, R)
+        U = self._unpack(u)
+        return self.theano_loss(*(U + [X, R]))
 
     def optimize_grad(self, u, X, R):
-        U = numpy.reshape(u, (self.d, self.k))
-        grad = self.theano_grad(U, X, R)
-        return grad.flatten()
+        U = self._unpack(u)
+        grad = self.theano_grad(*(U + [X, R]))
+        return self._flatten(grad)
 
     def set_params(self, u):
-        self.U = numpy.reshape(u, (self.d, self.k))
-        self.reset_model_updated()
+        if type(u) == list:
+            self.U = u
+        else:
+            self.U = self._unpack(u)
+            self.reset_model_updated()
+
+    def get_params(self):
+        return self.U
+
+    def _unpack(self, u):
+        pt = 0
+        out = []
+        for i, s in enumerate(zip(self.sizes[:-1], self.sizes[1:])):
+            out.append(numpy.reshape(u[pt:pt+s[0]*s[1]], s))
+            pt += s[0]*s[1]
+            
+        return out
+
+    def _flatten(self, U):
+        return numpy.concatenate(map(lambda x: x.flatten(), U))
+
+    def get_flat_params(self):
+        return self._flatten(self.U)
 
     def sample_minibatch(self):
         ''' sample a minibatch of reward images. each image is a random
@@ -279,16 +320,19 @@ class Reconstructive_LSTD(Base_LSTD):
 
         return numpy.dot(self.encode(X), self.wz)
 
-    def model_reward_error(self, x, r):
-
+    def get_model_reward(self, X):
+        
         self.update_model_statistics()        
 
         if not self.updated['qz']:
             #self.q = scipy.linalg.lstsq(self.states, self.rewards)[0]
             self.qz = scipy.linalg.solve(self.S_z + self.subs_shift, self.b_z)
             self.updated['qz'] = True
+        return numpy.dot(self.encode(X), self.qz) 
+
+    def model_reward_error(self, x, r):
         
-        rhat = numpy.dot(self.encode(x), self.qz) 
+        rhat = self.get_model_reward(x) 
         return numpy.sqrt(numpy.sum((rhat - r)**2)) / len(r)
 
     def model_transition_error(self, x, Tz = None): 
