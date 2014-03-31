@@ -83,6 +83,8 @@ class RL_Output(object):
 
 class LSTD_Experiment(object):
     
+    td_steps = [1,2,4] # XXX hardcoded here        
+
     def __init__(self,
                 p = 2000, # total number of samples used for learning
                 n = 200, # dimension of each image
@@ -110,7 +112,6 @@ class LSTD_Experiment(object):
         self.k = k
         self.max_iter = max_iter
         self.optimizer = optimizer
-        self.td_steps = [1,2,4] # XXX hardcoded here        
 
         self.world = rsis.TorusWorld() if world is 'torus' else rsis.CircleWorld(gam=gam)
         self.fmap = rsis.TileFeatureMap(d) # XXX seed for tile features
@@ -139,6 +140,12 @@ class LSTD_Experiment(object):
 
         self.output = RL_Output(self.k, self.d, self.fmap, self.model)
 
+    # XXX revisit output object and serialization design 
+
+    def set_model_params(self, U):
+        self.model.set_params(U)
+        self.output.model_params = self.model.get_params()
+
     def resample_model_data(self, seed = None):
         x_data, r_data = self.sample_world(self.p, seed)
         self.model.set_data(x_data, r_data) # set the data set subsampled for rica loss
@@ -159,7 +166,7 @@ class LSTD_Experiment(object):
 
         logger.info('h/o sample %s lstd td error (short): %05f' % ('k ' if k else '', tderr[0]))
         logger.info('h/o sample %s lstd td error (long): %05f' % ('k ' if k else '', tderr[-1]))
-        logger.info('norm of lstd weights: %05f' % numpy.sum(self.model.w_k**2) if k else numpy.sum(self.model.w**2)) 
+        logger.info('norm of lstd weights: %05f' % numpy.sqrt(numpy.sum(self.model.w_k**2)) if k else numpy.sum(self.model.w**2)) 
         
         pref = str(self.k[-1]) + ('svd-' if k else '')
         d = dict([(pref + 'lstd-td-' + str(self.td_steps[i]), tderr[i]) for i in xrange(len(self.td_steps))])
@@ -180,13 +187,17 @@ class LSTD_Experiment(object):
         train_loss = numpy.sum(self.model.theano_loss(*(self.model.U + [X, R, Y]))) # sum is just to make the output a scalar, not an array
         test_loss = numpy.sum(self.model.theano_loss(*(self.model.U + [X_test, R_test, Y_test]))) # test loss is 
 
-        tderr = [self.model.td_error(self.model.get_model_value(x_test),r_test,n=i) for i in self.td_steps]  
         rerr = self.model.model_reward_error(x_test, r_test) 
         zerr = self.model.model_transition_error(x_test)
-        
+        tderr = [self.model.td_error(self.model.get_model_value(x_test),r_test,n=i) for i in self.td_steps]  
+        r_mag = numpy.linalg.norm(r_test) / len(r_test)      
+        constant_td = numpy.linalg.norm(r_test - numpy.mean(r_test)) / len(r_test)
+
         logger.info('h/o sample model td error (short): %05f' % tderr[0])
         logger.info('h/o sample model td error (long): %05f' % tderr[-1])
-        logger.info('norm of model weights: %05f' % numpy.sum(self.model.wz**2)) 
+        logger.info('h/o sample constant td error : %05f' % constant_td)
+        logger.info('h/o sample reward magnitude : %05f' % r_mag)
+        logger.info('norm of model weights: %05f' % numpy.sqrt(numpy.sum(self.model.wz**2)))
         
         pref = str(self.k[-1])
         d = dict([(pref + 'model-td-' + str(self.td_steps[i]), tderr[i]) for i in xrange(len(self.td_steps))])
@@ -194,6 +205,8 @@ class LSTD_Experiment(object):
                  pref+'model-test-loss':test_loss,
                  pref+'model-rerr': rerr,
                  pref+'model-trans': zerr,
+                 'constant-td': constant_td, 
+                 'r-mag': r_mag, 
                  'iter': self.it})
         self.output.loss_values.append(d)
         self.output._loss_df = None # reset loss df to be rebuilt
@@ -202,7 +215,8 @@ class LSTD_Experiment(object):
     def train_model(self,
                     eval_freq = 1, 
                     resample_freq = None, 
-                    optimizer = scipy.optimize.fmin_l_bfgs_b):
+                    optimizer = scipy.optimize.fmin_l_bfgs_b,
+                    gtol = 1e-12):
      
         logger.info('*** training iteration ' + str(self.it) + '***')
 
@@ -226,7 +240,8 @@ class LSTD_Experiment(object):
                     self.model.get_flat_params(), 
                     self.model.optimize_grad,
                     args=(X, R, Y),
-                    maxiter=self.max_iter
+                    maxiter=self.max_iter,
+                    pgtol=gtol,
                     )[0]
                 )
             
@@ -239,7 +254,8 @@ class LSTD_Experiment(object):
                     self.model.optimize_grad,
                     args=(X, R, Y),
                     full_output=False,
-                    maxiter=self.max_iter
+                    maxiter=self.max_iter,
+                    gtol=gtol,
                     )
                 )
 
@@ -282,47 +298,32 @@ class PostProcess(object):
 
     def save_csv(self):
         self.loss_df.to_csv('data/losses%s.csv' % self.output.timestamp)
+    
+    def plot_loss_curve(self, filt_str, file_str):
 
-    def plot_loss_curve(self):
-        
-        # XXX add line for td error of the true value function 
         plt.clf()
-        for i, c in enumerate(self.loss_df.columns):
-            
-            # remove all nans
-            y = self.loss_df[c].dropna().values
-            n = len(y)
-            #non_nan = numpy.invert(numpy.isnan(y))
-            #ids = non_nan.nonzero()[0] # corresponding iteration numbers
-            
-            if len(y) == 1: 
-                assert False
-                #y = y * numpy.ones(n-2)
-            
-            ids = numpy.arange(n)
-                
-            if 'rerr' in c: 
-                plt.subplot(4,1,1)
-                plt.plot(ids, y, label = c)
+        for c in [a for a in self.loss_df.columns if filt_str in a]:
+            for j, h in enumerate(self.model.k):
+                if str(h) in c:
+                    y = self.loss_df[c].dropna().values
+                    ids = numpy.arange(len(y))
+                    plt.subplot(len(self.model.k),1,j+1)
+                    plt.plot(ids, y, label = c)
 
-            elif 'trans' in c:
-                plt.subplot(4,1,2)
-                plt.plot(ids, y, label = c)
-
-            elif '-td' in c:
-                plt.subplot(4,1,3)
-
-                plt.plot(ids, y, label = c)
-            
-            elif 'model' in c:
-                plt.subplot(4,1,4)
-                plt.plot(ids, y, label = c)
-
-        for i in xrange(4):
-            plt.subplot(4, 1, i+1)
-            plt.legend()        
+        for j in xrange(len(self.model.k)):
+            plt.subplot(len(self.model.k),1,j+1)
+            plt.legend()
+                    
+        plt.savefig('plots/%s.%s.png' % (file_str, self.timestamp))
         
-        plt.savefig('plots/loss-curve%s.png' % self.timestamp)
+    def plot_reward_err(self):
+        self.plot_loss_curve('rerr', 'reward-loss')
+    
+    def plot_transition_err(self):
+        self.plot_loss_curve('trans', 'transition-loss')
+    
+    def plot_td_err(self, n=1):
+        self.plot_loss_curve('-td-%i' % n, 'td-%i-loss' % n)
 
     def plot_learned(self):
         # plot a regular grid

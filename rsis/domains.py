@@ -66,15 +66,16 @@ class CircleWorld(object):
 
 class TorusWorld(object):
 
-    def __init__(self, reward = 0.2, eps_z = 0.05, eps_R = 0., eps_T = 0.02):
-        self.reward = reward
+    def __init__(self, reward_scal= 10, reward_rad = 0.2, eps_z = 0.05, eps_R = 0., eps_T = 0.02):
+        self.reward_rad = reward_rad
+        self.reward_scal = reward_scal
         self.eps_z = eps_z
         self.R = np.eye(2) + eps_R * rng.randn(2, 2)
         self.T = eps_T * (np.ones(2) + 0.1 * rng.randn(2))
         self.g = np.zeros(2)
 
     def _reward(self, p):
-        return int(np.linalg.norm(p - self.g) < self.reward)
+        return self.reward_scal if np.linalg.norm(p - self.g) < self.reward_rad else -1 
 
     def reward_func(self, x):
         return np.array([self._reward(x[i]) for i in xrange(x.shape[0])])

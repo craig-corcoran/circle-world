@@ -6,19 +6,7 @@ import theano.sandbox.linalg.ops as LA
 import matplotlib.pyplot as plt
 
 theano.config.warn.subtensor_merge_bug = False
-
-class TD(object):
-    
-    def __init__(self, 
-                d, 
-                gam, 
-                l2_td,
-                ):
-        self.d = d        
-        self.gam = gam
-        self.l2_lstd = l2_lstd
         
-
 class BaseLSTD(object):
     
     ''' base LSTD with l2 regularization '''
@@ -68,7 +56,7 @@ class BaseLSTD(object):
             self.b = numpy.zeros(self.n.shape)
             self.ntot = 0
             
-        nadd = len(R)
+        nadd = len(R)-1 # XXX is this right 
 
         self.S = self.running_avg(self.S, 
                              numpy.dot(X[:-1].T, X[:-1]), 
@@ -81,7 +69,7 @@ class BaseLSTD(object):
                               self.ntot+nadd)
                               
         self.b = self.running_avg(self.b,
-                             numpy.dot(X.T, R),
+                             numpy.dot(X[:-1].T, R[:-1]),
                              self.ntot,
                              self.ntot+nadd)
 
@@ -151,18 +139,19 @@ class BaseLSTD(object):
         return numpy.sqrt(numpy.sum((xhat - x[1:])**2)) / len(xhat)
 
 
-class ReconstructiveLSTD(BaseLSTD):
-        
-    ''' uses rica-like loss to learn a representation that captures the subspace
-    spanned by r_t, r_t+1, ... '''
-
+class NN_Model(BaseLSTD):
+    
+    ''' uses a neural network trained on the bellman/temporal difference error.
+    the online weights for the value function can be used, or the last layer can
+    be solved in batch using lstd. '''
     def __init__(self, *args, **kwargs):
         
-        self.k = args[0] #  number of columns of U
+        self.k = args[0]  # number of columns of U
         self.n_layers = len(self.k)
         
         self.states = kwargs.pop('states') # full state/reward sequence, subsampled during learning
         self.rewards = kwargs.pop('rewards')
+        self.n_samples = len(self.rewards)-1
         
         self.freeze_layers = kwargs.pop('freeze_layers', [False]*self.n_layers)
         self.n = kwargs.pop('n', 100) # size of 'image' (subsample from statespace) input into encoding
@@ -174,12 +163,10 @@ class ReconstructiveLSTD(BaseLSTD):
         self.subs_shift = numpy.identity(self.k[-1]) * self.l2_subs
         
         self.g, self.g_t, self.g_str = kwargs.pop('g', None) # encoding transformation (no default)
-        init_scale = kwargs.pop('init_scale', 1e-8)
-        self.eps = kwargs.pop('eps', 1e-4) # used to determine the horizon h w/ gam
-        max_h = kwargs.pop('max_h', None)
-
-        super(ReconstructiveLSTD, self).__init__(*args[1:], **kwargs)
+        init_scale = kwargs.pop('init_scale', 1e-4)
         
+        super(NN_Model, self).__init__(*args[1:], **kwargs)
+
         self.sizes = (self.d,) + self.k
         
         # initialize the parameters with the given ones if present, or random ones if Uinit is none
@@ -187,10 +174,7 @@ class ReconstructiveLSTD(BaseLSTD):
                   init_scale*numpy.random.randn(self.sizes[i], self.sizes[i+1]) 
                   for i in xrange(self.n_layers)]
 
-        self.n_samples = len(self.rewards)
-        horiz = int(numpy.log(self.eps) / numpy.log(self.gam)) # determine horizon where gam^h < eps
-        self.h = min(horiz, max_h) if max_h else horiz 
-                
+
         self.U_t = [TT.dmatrix('U%i' % i) for i in xrange(self.n_layers)]
         self.X_t = TT.dtensor3('X')
         self.R_t = TT.dmatrix('R')
@@ -231,7 +215,9 @@ class ReconstructiveLSTD(BaseLSTD):
 
     def optimize_loss(self, u, X, R, Y):
         U = self._unpack(u)
-        return self.theano_loss(*(U + [X, R, Y]))
+        loss =  self.theano_loss(*(U + [X, R, Y]))
+        #print 'optimize loss: ', loss
+        return loss
 
     def optimize_grad(self, u, X, R, Y):
         U = self._unpack(u)
@@ -239,6 +225,8 @@ class ReconstructiveLSTD(BaseLSTD):
         for i in xrange(self.n_layers):
             if self.freeze_layers[i]:
                 grad[i] = numpy.zeros_like(grad[i])
+
+        #print 'optimize gradient norm: ', numpy.linalg.norm(self._flatten(grad))
         return self._flatten(grad)
 
     def set_params(self, u):
@@ -272,8 +260,8 @@ class ReconstructiveLSTD(BaseLSTD):
     def update_model_statistics(self):
         if not self.updated['model-stats']:
             Z = self.encode(self.states)
-            self.S_z = numpy.dot(Z.T, Z) / self.n_samples
-            self.Sp_z = numpy.dot(Z[:-1].T, Z[1:]) / (self.n_samples-1)
+            self.S_z = numpy.dot(Z[:-1].T, Z[:-1]) / self.n_samples
+            self.Sp_z = numpy.dot(Z[:-1].T, Z[1:]) / self.n_samples
             self.b_z = numpy.dot(Z.T, self.rewards) / self.n_samples
             self.updated['model-stats'] = True
 
@@ -317,10 +305,50 @@ class ReconstructiveLSTD(BaseLSTD):
         xhat = self.decode(numpy.dot(self.encode(x[:-1]),self.Tz))
         return numpy.sqrt(numpy.sum((xhat - x[1:])**2)) / len(x) 
     
+    def encode(self, y):
+        for i in xrange(self.n_layers):
+            y = self.g(numpy.dot(y, self.U[i]))
+        return y
+    
+    def encode_t(self):
+        Z = [self.g_t(TT.dot(self.Y_t, self.U_t[0]))]
+        for i in xrange(self.n_layers-1):
+            Z.append(self.g_t(TT.dot(Z[i], self.U_t[i+1])))
+        return Z   
+
+class NNTD(NN_Model):
+
+    def __init__(self, *args, **kwargs):
+        
+        self.beta_t = TT.dvector('beta') # weights for bellman error loss
+        # XXX add beta to get_params etc
+
+    def loss_t(self):
+        self.Z_t, 
+        # equiv to sum_i || g(y_i.T U) U.T - y_i ||^2
+        return TT.sum(abs(self.decode_t() - self.Y_t)) / (self.m * self.n) 
+
+class ReconstructiveLSTD(NN_Model):
+        
+    ''' uses rica-like loss to learn a representation that captures the subspace
+    spanned by r_t, r_t+1, ... '''
+
+    def __init__(self, *args, **kwargs):
+        
+        self.eps = kwargs.pop('eps', 1e-4) # used to determine the horizon h w/ gam
+        max_h = kwargs.pop('max_h', None)
+        super(ReconstructiveLSTD, self).__init__(*args, **kwargs)
+
+        horiz = int(numpy.log(self.eps) / numpy.log(self.gam)) # determine horizon where gam^h < eps
+        self.h = min(horiz, max_h) if max_h else horiz 
+                
+
     def sample_image(self, n):
         ''' picks a random time step difference, then randomly subsamples from
         the available samples (with replacement) '''
-        i = numpy.random.randint(self.h+1) # uniform dist over horiz lengths 
+
+        i = min(numpy.random.geometric(1-self.gam), self.h) # geometrically distributed
+        #i = numpy.random.randint(self.h+1) # uniform dist over horiz lengths 
 
         # sampling with replacement until nonzero reward signal
         t = numpy.random.randint(self.n_samples-i, size=n) 
@@ -345,11 +373,6 @@ class ReconstructiveLSTD(BaseLSTD):
         
         x = numpy.rollaxis(x, 2) # makes x [dxmxn]
         return x, r, y
-    
-    def encode(self, y):
-        for i in xrange(self.n_layers):
-            y = self.g(numpy.dot(y, self.U[i]))
-        return y
     
     def decode(self, z):
         for i in xrange(self.n_layers):
@@ -376,14 +399,6 @@ class StatespaceRLSTD(ReconstructiveLSTD):
             H.append(self.g_t(TT.dot(H[i], self.U_t[i+1])))
         return H
             
-    def decode_t(self):
-        # Z is [m,k]
-        # I is [m,d]
-        I = TT.dot(self.Z_t[-1], self.U_t[-1].T) 
-        for U in self.U_t[:-1][::-1]: 
-            I = TT.dot(I, U.T)
-        return I
-
     def loss_t(self):
         # equiv to sum_i || Xi^T U g( U^T Xi r_i) - r_i ||^2 
         # X is [d,m,n]
