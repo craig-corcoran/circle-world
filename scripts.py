@@ -1,28 +1,22 @@
 import os
-import time
-import datetime
-import copy
-import collections
-import numpy
-import pandas
-import scipy.optimize
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import theano
-import theano.tensor as TT
-import rsis
 import glob
+import cPickle as pickle  #cloud.serialization.cloudpickle as pickle
+import numpy
+import scipy.optimize
 import plac
-import cPickle as pickle #cloud.serialization.cloudpickle as pickle
+import rsis
 from rsis.experiments import LSTD_Experiment, PostProcess, tran_funcs
+
 
 logger = rsis.get_logger(__name__)
 
+# create function to map for random hyperparameter search
+# plot cosine distance
 # grid features
-# XXX learned features broken again - regularization?
 # td network with same architecture, similar samples / training
 # gold standard value func
 # td lambda error
+# normalize transition error by feature size
 # freeze first layer while converging with second, etc? (train layers: 1,2,1+2)
 # catch timeout on ncg / bfgs
 # smooth horizon diversity in minibatches
@@ -45,28 +39,33 @@ logger = rsis.get_logger(__name__)
 # - plot [average, max, var] loss across initializations no. reward samples seen, no. of resamples
 # - how to choose minibatch size and no. of samples/images from it
 
-def batch_experiment(
-                    p = 10000, # total number of samples used for learning
-                    n = 200, # dimension of each image
-                    m = 200, # number of samples per minibatch
-                    d = 200, # dimension of base feature representation
-                    k = (24,8),  # number of compressed features, U is [dxk]
-                    max_iter = 3, # max number of cg optimizer steps per iteration
-                    max_h = 1000, # max horizon
-                    l2_lstd = 1e-12, # reg used for full lstd
-                    l2_subs = 1e-12, # reg used for subspace lstd
-                    reg_loss = ('l2', 1e-12),
-                    gam = 1-1e-2,
-                    world = 'torus',
-                    seed = 0,
-                    tran_func = 'sigmoid',
-                    optimizer = scipy.optimize.fmin_l_bfgs_b, # fmin_l_bfgs_b, fmin_bfgs, fmin_ncg, fmin_cg
-                    model = rsis.StatespaceRLSTD,
-                    eval_freq = 1,
-                    rel_imp = 1e-7,
-                    patience = 5,
-                    ):
+#
 
+def batch_experiment(
+        p=5000,  # total number of samples used for learning
+        n=300,  # dimension of each image
+        m=300,  # number of samples per minibatch
+        d=100,  # dimension of base feature representation
+        k=(16,),  # number of compressed features, U is [dxk]
+        max_iter=4,  # max number of cg optimizer steps per iteration
+        max_h=2000,  # max horizon
+        l2_lstd=1e-12,  # reg used for full lstd
+        l2_subs=1e-12,  # reg used for subspace lstd
+        reg_loss=('l2', 1e0),
+        init_scale=1e-3,
+        gam=1-1e-2,
+        world='torus',
+        seed=0,
+        tran_func='sigmoid',
+        optimizer=scipy.optimize.fmin_cg,  # fmin_l_bfgs_b, fmin_bfgs, fmin_ncg, fmin_cg
+        model=rsis.StatespaceRLSTD,
+        eval_freq=1,
+        samp_dist= 'geom',  # sample distribution for images (geom or unif)
+        patience=10,
+        max_training_steps = 50,
+):
+
+    os.system('rm plots/*.png')
     g = tran_funcs[tran_func]
 
     n_layers = len(k)
@@ -74,85 +73,74 @@ def batch_experiment(
 
     for jj in xrange(n_layers):
 
-        logger.info("training layer %i" % (jj+1))
+        logger.info("training layer %i" % (jj + 1))
 
         logger.info("building experiment and model objects")
 
         # initialize weights to previous shallower model if jj > 0
         Uinit = experiment.model.U if jj else []
-        Uinit += [None]*(n_layers-jj)
+        Uinit += [None] * (n_layers - jj)
 
         experiment = LSTD_Experiment(
-                                    p=p,n=n,m=m,d=d,k=k[:jj+1],
-                                    max_iter=max_iter, max_h=max_h,
-                                    l2_lstd=l2_lstd,l2_subs=l2_subs,reg_loss=reg_loss,
-                                    gam=gam, world=world, seed=seed, g=g,
-                                    model=model,
-                                    Uinit=Uinit,
-                                    )
+            p=p, n=n, m=m, d=d, k=k[:jj + 1],
+            max_iter=max_iter, max_h=max_h,
+            l2_lstd=l2_lstd, l2_subs=l2_subs, reg_loss=reg_loss,
+            gam=gam, world=world, seed=seed, g=g,
+            model=model,
+            Uinit=Uinit,
+            init_scale=init_scale,
+        )
 
-        if output: # add losses from the previous iterations
+        if output:  # add losses from the previous iterations
             experiment.output.loss_values = output.loss_values
 
         logger.info("training and evaluating model")
 
-        delta_loss_frac = 1e16
-        delta_weig_frac = 1e16
         loss_best = 1e16
-        Ubest = 1e16
         it = 0
         wait = 0
 
         try:
-            while wait < patience:
+            while (wait < patience) and (it < max_training_steps):
 
                 logger.info("batch %i" % it)
-
-                # measure parameters before learning step
-                Uold = experiment.model.get_flat_params()
-
                 # optimize the model
                 experiment.train_model(eval_freq=eval_freq,
-                                       optimizer=optimizer)
+                                       optimizer=optimizer,
+                                       samp_dist=samp_dist)
 
-                # measure loss and parameters after learning step
-                Unew = experiment.model.get_flat_params()
-                loss_new = experiment.model.td_error(experiment.model.get_model_value(experiment.x_test), experiment.r_test)
-
-                # measure change in parameters and hold out loss
-                dweights = numpy.linalg.norm(Ubest-Uold)
-                delta_loss_frac = (loss_best-loss_new) / loss_best
-                delta_weig_frac = dweights / numpy.linalg.norm(Ubest)
-
-                logger.info('fraction change in loss: %04f' % delta_loss_frac)
-                logger.info('fraction change in weights: %04f' % delta_weig_frac)
-                logger.info('absolute change in weights: %04f' % dweights)
-
+                # measure rsis loss after learning step
+                loss_new = experiment.model.theano_loss(*experiment.model.get_params() +
+                                                        list(experiment.model.sample_minibatch(samp_dist, seed)))
                 it += 1
-                if it == 1 or (delta_loss_frac > rel_imp): # or (delta_weig_frac > rel_imp)):
+
+                if loss_new < loss_best:
                     wait = 0
-                    Ubest = Unew
+                    Ubest = experiment.model.get_flat_params()
                     loss_best = loss_new
                     logger.info("new best loss: %04f" % loss_best)
                 else:
                     wait += 1
                     logger.info('converging (wait, patience): (%i, %i)' % (wait, patience))
 
+                logger.info("best loss: %04f" % loss_best)
+                logger.info("current loss: %04f" % loss_new)
+
+
         except KeyboardInterrupt:
             logger.info('\n user stopped current training loop')
 
         experiment.set_model_params(Ubest)
-        output = experiment.output # to pass output onto next layer model
+        output = experiment.output  # to pass output onto next layer model
 
     logger.info("pickling results")
     with open('data/experiment%s.pkl' % experiment.output.timestamp, 'wb') as pfile:
         pickle.dump(experiment.output, pfile)
 
-    return experiment
+    return experiment, model
 
 
-def post_process(experiment = None, world = 'torus', model = rsis.StatespaceRLSTD):
-
+def post_process(experiment=None, world='torus', model=rsis.StatespaceRLSTD):
     if experiment is None:
         paths = glob.glob('data/*.pkl')
         paths.sort()
@@ -162,11 +150,11 @@ def post_process(experiment = None, world = 'torus', model = rsis.StatespaceRLST
         with open(exp_path, 'rb') as pfile:
             output = pickle.load(pfile)
 
-
         logger.info("updating the output and model objects")
-        output.model_kwargs.update({'g': tran_funcs[output.model_kwargs['g']]}) # swap output.g (string) for the tuple including functions
+        output.model_kwargs.update(
+            {'g': tran_funcs[output.model_kwargs['g']]})  # swap output.g (string) for the tuple including functions
         model = model(*output.model_args, **output.model_kwargs)
-        model.set_params(output.model_params) # XXX learned params currently not taken by constructor
+        model.set_params(output.model_params)  # XXX learned params currently not taken by constructor
 
         world = rsis.TorusWorld() if world is 'torus' else rsis.CircleWorld(gam=output.model_args[2])
 
@@ -183,28 +171,29 @@ def post_process(experiment = None, world = 'torus', model = rsis.StatespaceRLST
     postproc.save_csv()
 
     # remove old plots
-    os.system('rm plots/*.png')
+    # os.system('rm plots/*.png')
+
+    postproc.plot_learned()  # plot final learned features
 
     # plot learning curves for the transition, td, and reward error
     postproc.plot_reward_err()
     postproc.plot_transition_err()
-
+    postproc.plot_cosine_err()
     for stepsize in LSTD_Experiment.td_steps:
         postproc.plot_td_err(n=stepsize)
 
-    postproc.plot_learned() # plot final learned features
-    postproc.plot_value_rew() # plot value and reward functions
+    postproc.plot_value_rew()  # plot value and reward functions
+
 
 # (help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
-trainmodel=("boolean for whether training script should be run", 'option', None, int),
-postprocess=("boolean for whether postprocessing should be run", 'option', None, int)
+    trainmodel=("boolean for whether training script should be run", 'option', None, int),
+    postprocess=("boolean for whether postprocessing should be run", 'option', None, int)
 )
-def main(trainmodel = 1, postprocess = 1, world = 'torus',  model = rsis.ProjectedRLSTD):
-
+def main(trainmodel=1, postprocess=1, world='torus'):
     if trainmodel:
         logger.info("training new model")
-        experiment = batch_experiment(world=world, model=model)
+        experiment, model = batch_experiment(world=world)
     else:
         experiment = None
 
