@@ -103,6 +103,8 @@ class LSTD_Experiment(object):
                  optimizer=scipy.optimize.fmin_cg,
                  model=rsis.ProjectedRLSTD,
                  Uinit=None,
+                 bias_recon=None,
+                 bias_layer=None, # TODO fix naming convention for biases and initial parameters
                  init_scale=1e-4,
     ):
 
@@ -138,6 +140,8 @@ class LSTD_Experiment(object):
                            max_h=max_h,
                            g=g,
                            Uinit=Uinit,
+                           bias_layer=bias_layer,
+                           bias_recon=bias_recon,
                            init_scale=init_scale)
 
         self.output = RL_Output(self.k, self.d, self.fmap, self.model)
@@ -260,8 +264,6 @@ class LSTD_Experiment(object):
 
         X, R, Y = self.model.sample_minibatch(samp_dist=samp_dist)
 
-        logger.info("magnitude of gradient at current param values (before): %04f" %
-                    numpy.linalg.norm(self.model.optimize_grad(self.model.get_flat_params(), X, R, Y)))
 
         if eval_freq:
             if (self.it % eval_freq == 0):

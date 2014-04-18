@@ -1,6 +1,6 @@
 import os
 import glob
-import cPickle as pickle  #cloud.serialization.cloudpickle as pickle
+import cPickle as pickle
 import numpy
 import scipy.optimize
 import plac
@@ -10,8 +10,17 @@ from rsis.experiments import LSTD_Experiment, PostProcess, tran_funcs
 
 logger = rsis.get_logger(__name__)
 
+
+# plot iteration used (Ubest)
+# untied weights
+# autoencoder as score matching - what distribution?
+# profile performance
+# add exponentially decaying weights on horizon losses
+# freeze weights while learning initial recon bias?
+# plot learned bias
+# try giving larger dataset to fmin (no loop around fmin)
+
 # create function to map for random hyperparameter search
-# plot cosine distance
 # grid features
 # td network with same architecture, similar samples / training
 # gold standard value func
@@ -39,29 +48,28 @@ logger = rsis.get_logger(__name__)
 # - plot [average, max, var] loss across initializations no. reward samples seen, no. of resamples
 # - how to choose minibatch size and no. of samples/images from it
 
-#
 
 def batch_experiment(
         p=5000,  # total number of samples used for learning
         n=300,  # dimension of each image
-        m=300,  # number of samples per minibatch
+        m=200,  # number of samples per minibatch
         d=100,  # dimension of base feature representation
-        k=(16,),  # number of compressed features, U is [dxk]
-        max_iter=4,  # max number of cg optimizer steps per iteration
+        k=(24, 12),  # number of compressed features, U is [dxk]
+        max_iter=3,  # max number of cg optimizer steps per iteration
         max_h=2000,  # max horizon
         l2_lstd=1e-12,  # reg used for full lstd
         l2_subs=1e-12,  # reg used for subspace lstd
-        reg_loss=('l2', 1e0),
-        init_scale=1e-3,
+        reg_loss=('l2', 1e-6),
+        init_scale=1e-2,
         gam=1-1e-2,
         world='torus',
         seed=0,
         tran_func='sigmoid',
         optimizer=scipy.optimize.fmin_cg,  # fmin_l_bfgs_b, fmin_bfgs, fmin_ncg, fmin_cg
-        model=rsis.StatespaceRLSTD,
+        model=rsis.ProjectedRLSTD,
         eval_freq=1,
         samp_dist= 'geom',  # sample distribution for images (geom or unif)
-        patience=10,
+        patience=50,
         max_training_steps = 50,
 ):
 
@@ -77,9 +85,14 @@ def batch_experiment(
 
         logger.info("building experiment and model objects")
 
+        # TODO add initial bias values
         # initialize weights to previous shallower model if jj > 0
         Uinit = experiment.model.U if jj else []
+        bias_layer = experiment.model.bias_layer if jj else []
+        bias_recon = experiment.model.bias_recon if jj else None
+
         Uinit += [None] * (n_layers - jj)
+        bias_layer += [None] * (n_layers - jj)
 
         experiment = LSTD_Experiment(
             p=p, n=n, m=m, d=d, k=k[:jj + 1],
@@ -88,6 +101,8 @@ def batch_experiment(
             gam=gam, world=world, seed=seed, g=g,
             model=model,
             Uinit=Uinit,
+            bias_layer=bias_layer,
+            bias_recon=bias_recon,
             init_scale=init_scale,
         )
 
@@ -126,11 +141,13 @@ def batch_experiment(
                 logger.info("best loss: %04f" % loss_best)
                 logger.info("current loss: %04f" % loss_new)
 
+                logger.info("current alpha norm: %04f" % numpy.linalg.norm(experiment.model.alpha))
+
 
         except KeyboardInterrupt:
             logger.info('\n user stopped current training loop')
 
-        experiment.set_model_params(Ubest)
+        #experiment.set_model_params(Ubest)
         output = experiment.output  # to pass output onto next layer model
 
     logger.info("pickling results")

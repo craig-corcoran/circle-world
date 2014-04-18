@@ -157,7 +157,8 @@ class NN_Model(BaseLSTD):
         self.n = kwargs.pop('n', 100)  # size of 'image' (subsample from statespace) input into encoding
         self.m = kwargs.pop('m', 100)  # size of minibatch: number of images used for estimating gradient
         Uinit = kwargs.pop('Uinit', [None] * self.n_layers)
-        # bias_init = kwargs.pop('Uinit', [None] * self.n_layers) # XXX
+
+        bias_layer_init = kwargs.pop('bias_layer', [None] * self.n_layers)
 
         self.reg_loss = kwargs.pop('reg_loss', ('l2', 1e-4))  # l2 regularization of U with reconstructive loss
         self.l2_subs = kwargs.pop('l2_subs', 1e-4)  # l2 regularization when doing lstd on the subspace of U
@@ -170,14 +171,17 @@ class NN_Model(BaseLSTD):
 
         self.sizes = (self.d,) + self.k
 
+
+        #self.bias_recon = bias_recon_init if bias_recon_init else numpy.zeros(self.n)
+        self.bias_layer = [bias_layer_init[i] if not bias_layer_init[i] is None else
+                           numpy.zeros(self.sizes[i + 1])
+                           for i in xrange(self.n_layers)]
         # initialize the parameters with the given ones if present, or random ones if Uinit is none
         self.U = [Uinit[i] if not Uinit[i] is None else
                   init_scale * numpy.random.randn(self.sizes[i], self.sizes[i + 1])
                   for i in xrange(self.n_layers)]
-        # self.bias = [bias_init[i] if not bias_init[i] is None else
-        #           init_scale * numpy.random.randn(self.sizes[i], self.sizes[i + 1])
-        #           for i in xrange(self.n_layers)]
 
+        self.bias_layer_t = [TT.dvector('bias_layer%i' % i) for i in xrange(self.n_layers)]
         self.U_t = [TT.dmatrix('U%i' % i) for i in xrange(self.n_layers)]
         self.X_t = TT.dtensor3('X')
         self.R_t = TT.dmatrix('R')
@@ -192,15 +196,22 @@ class NN_Model(BaseLSTD):
     def _flatten(U):
         return numpy.concatenate([x.flatten() for x in U])
 
-    # XXX fix shapes and unpack for biases
     def _unpack(self, u):
         pt = 0
-        out = []
+        weights = []
         for i, s in enumerate(zip(self.sizes[:-1], self.sizes[1:])):
-            out.append(numpy.reshape(u[pt:pt + s[0] * s[1]], s))
+            weights.append(numpy.reshape(u[pt:pt + s[0] * s[1]], s))
             pt += s[0] * s[1]
 
-        return out
+        biases = []
+        for i, s in enumerate(self.sizes):
+            biases.append(u[pt:pt + s])
+            pt += s
+
+        if len(u) > pt: # if model has a reconstruction bias (not nntd)
+            biases.append(u[pt:])  # append bias_recon
+
+        return weights, biases
 
     def set_data(self, x_data, r_data):
 
@@ -213,13 +224,19 @@ class NN_Model(BaseLSTD):
             {'model-stats': False, 'wz': False, 'qz': False, 'Tz': False})
 
     def compile_theano_funcs(self):
+
         reg_str, reg_val = self.reg_loss
+
         if reg_str == 'l2':
             reg = 0
             for i in xrange(self.n_layers):
                 reg += TT.sum(self.U_t[i] ** 2)
+
+            reg = TT.sqrt(reg)
+
         elif reg_str == 'l1':
             reg = TT.sum(abs(self.Z_t[-1]))
+
         else:
             assert False # TODO add contractive loss
         loss = self.loss_t() + reg_val * reg
@@ -249,18 +266,19 @@ class NN_Model(BaseLSTD):
 
     def set_params(self, u):
 
-        if type(u) == list:
-            self.U = u
+        if (type(u) == list) or (type(u) == tuple):
+            self.U = u[0]
+            self.bias_layer = u[1]
         else:
-            self.U = self._unpack(u)
+            self.U, self.bias_layer = self._unpack(u)
 
         self.reset_model_updated()
 
     def get_params(self):
-        return self.U
+        return self.U + self.bias_layer
 
     def get_theano_params(self):
-        return self.U_t
+        return self.U_t + self.bias_layer_t
 
     def get_flat_params(self):
         return self._flatten(self.get_params())
@@ -316,27 +334,19 @@ class NN_Model(BaseLSTD):
     def encode(self, y):
         y = y
         for i in xrange(self.n_layers):
-            y = self.g(numpy.dot(y, self.U[i]))
+            y = self.g(numpy.dot(y, self.U[i]) - self.bias_layer[i])
 
         return y
 
     def encode_t(self):
-        Z = [self.g_t(TT.dot(self.Y_t, self.U_t[0]))]  # XXX currently not all NN models have a bias_recon
+        Z = [self.g_t(TT.dot(self.Y_t, self.U_t[0]) - self.bias_layer_t[0])]
         for i in xrange(self.n_layers - 1):
-            Z.append(self.g_t(TT.dot(Z[i], self.U_t[i + 1])))
+            Z.append(self.g_t(TT.dot(Z[i] - self.bias_layer_t[i+1], self.U_t[i + 1])))
         return Z
 
 
 class NNTD(NN_Model):
-    def __init__(self, *args, **kwargs):
-        self.beta_t = TT.dvector('beta')  # weights for bellman error loss
-        # XXX add beta to get_params etc
-
-    def loss_t(self):
-        self.Z_t,
-        # equiv to sum_i || g(y_i.T U) U.T - y_i ||^2
-        return TT.sum(abs(self.decode_t() - self.Y_t)) / (self.m * self.n)
-
+    pass
 
 class ReconstructiveLSTD(NN_Model):
     ''' uses reconstruction loss to learn a representation that captures the subspace
@@ -346,17 +356,20 @@ class ReconstructiveLSTD(NN_Model):
 
         self.eps = kwargs.pop('eps', 1e-4)  # used to determine the horizon h w/ gam
         max_h = kwargs.pop('max_h', None)
+        alpha = kwargs.pop('alpha', None)
+        self.alpha_t = TT.dvector('alpha')
 
         super(ReconstructiveLSTD, self).__init__(*args, **kwargs)
 
+        self.alpha = alpha if alpha is not None else numpy.ones(self.sizes[-1])
         horiz = int(numpy.log(self.eps) / numpy.log(self.gam))  # determine horizon where gam^h < eps
         self.h = min(horiz, max_h) if max_h else horiz
 
     def get_params(self):
-        return self.U + [self.bias_recon]
+        return self.U + self.bias_layer + [self.bias_recon, self.alpha]
 
     def get_theano_params(self):
-        return self.U_t + [self.bias_recon_t]
+        return self.U_t + self.bias_layer_t + [self.bias_recon_t, self.alpha_t]
 
     def sample_image(self, n, samp_dist='geom', seed=None):
         ''' picks a random time step difference, then randomly subsamples from
@@ -400,41 +413,47 @@ class ReconstructiveLSTD(NN_Model):
 
     def decode(self, z):
         for i in xrange(self.n_layers):
-            z = numpy.dot(z, self.U[-(i + 1)].T)
+            z = numpy.dot(z * self.alpha if not i else z, self.U[-(i + 1)].T)
         return z
 
     def decode_t(self):
-        I = TT.dot(self.Z_t[-1], self.U_t[-1].T)
+        I = TT.dot(self.Z_t[-1] * self.alpha_t, self.U_t[-1].T)
         for U in self.U_t[:-1][::-1]:
             I = TT.dot(I, U.T)
         return I
 
     def set_params(self, u):
 
-        if type(u) == list:
+        if (type(u) == list) or (type(u) == tuple):
             out = u
         else:
             out = self._unpack(u)
 
-        self.U = out[:-1]
-        self.bias_recon = out[-1]
+        self.U = out[0]
+        self.bias_layer = out[1][:-1]
+        self.bias_recon = out[1][-1]
+        self.alpha = out[2]
         self.reset_model_updated()
-
-    def get_params(self):
-        return self.U + [self.bias_recon]
-
-    def get_theano_params(self):
-        return self.U_t + [self.bias_recon_t]
 
     def _unpack(self, u):
         pt = 0
-        out = []
+        weights = []
         for i, s in enumerate(zip(self.sizes[:-1], self.sizes[1:])):
-            out.append(numpy.reshape(u[pt:pt + s[0] * s[1]], s))
+            weights.append(numpy.reshape(u[pt:pt + s[0] * s[1]], s))
             pt += s[0] * s[1]
 
-        out.append(u[pt:])  # append bias_recon
-        return out
+        biases = []
+        for i, s in enumerate(self.sizes[1:]):
+            biases.append(u[pt:pt + s])
+            pt += s
+
+        biases.append(u[pt:pt + self.bias_recon_len])  # append bias_recon
+        pt += self.bias_recon_len
+
+        alpha = u[pt:]
+        assert len(alpha) == self.sizes[-1]
+
+        return weights, biases, alpha
 
 
 class StatespaceRLSTD(ReconstructiveLSTD):
@@ -444,18 +463,20 @@ class StatespaceRLSTD(ReconstructiveLSTD):
         self.bias_recon_t = TT.dvector('bias_recon')
         super(StatespaceRLSTD, self).__init__(*args, **kwargs)
 
-        # if no initial bias given, set to the mean reward image of a minibatch
-        self.bias_recon = bias_recon if bias_recon else numpy.mean(self.sample_minibatch()[1], axis=0)
+        # if no initial bias given, set to the mean reward image of a minibatch or zero
+        # self.bias_recon = bias_recon if bias_recon else numpy.mean(self.sample_minibatch()[1], axis=0)
+        self.bias_recon = bias_recon if bias_recon is not None else numpy.zeros(self.n)
+        self.bias_recon_len = self.n
 
     def encode_t(self):
         # X is [dxmxn]
         # R is [m,n]
         # U is [d,k]
-        Y = TT.sum(TT.mul(self.X_t, self.R_t), axis=2).T  # Y is [m,d]
+        Y = TT.sum(TT.mul(self.X_t, self.R_t), axis=2).T  # Y is [m,d] // TODO bias here?
         #H = [self.g_t(TT.sum(TT.tensordot(self.U_t[0].T, self.X_t, 1) * self.R_t, axis=2)).T] # mxk matrix of first layer hidden unit activations
-        H = [self.g_t(TT.dot(Y, self.U_t[0]))]  # [m,k]
+        H = [self.g_t(TT.dot(Y, self.U_t[0]) - self.bias_layer_t[0])]  # [m,k]
         for i in xrange(self.n_layers - 1):
-            H.append(self.g_t(TT.dot(H[i], self.U_t[i + 1])))
+            H.append(self.g_t(TT.dot(H[i], self.U_t[i + 1]) - self.bias_layer_t[i+1]))
         return H
 
     def loss_t(self):
@@ -464,7 +485,7 @@ class StatespaceRLSTD(ReconstructiveLSTD):
         # I is [m,d]
         I = self.decode_t()
         Rhat = TT.sum(TT.mul(self.X_t.T, I), axis=2).T
-        return TT.sum((Rhat - self.R_t - self.bias_recon_t) ** 2) / (self.m * self.n)
+        return TT.sum(( Rhat - self.R_t - self.bias_recon_t) ** 2) / (self.m * self.n)
 
 
 class ProjectedRLSTD(ReconstructiveLSTD):
@@ -475,15 +496,17 @@ class ProjectedRLSTD(ReconstructiveLSTD):
         super(ProjectedRLSTD, self).__init__(*args, **kwargs)
 
         # if no initial bias given, set to the mean reward image in x-space of a minibatch
-        self.bias_recon = bias_recon if bias_recon else numpy.mean(self.sample_minibatch()[2], axis=0)
+        # self.bias_recon = bias_recon if bias_recon else numpy.mean(self.sample_minibatch()[2], axis=0)
+        self.bias_recon = bias_recon if bias_recon is not None else numpy.zeros(self.d)
+        self.bias_recon_len = self.d
     # Y is [m,d]
     # U is [d,k]
     # Z is [m,k]
 
     def encode_t(self):
-        Z = [self.g_t(TT.dot(self.Y_t, self.U_t[0]))]
+        Z = [self.g_t(TT.dot(self.Y_t, self.U_t[0]) - self.bias_layer_t[0])]
         for i in xrange(self.n_layers - 1):
-            Z.append(self.g_t(TT.dot(Z[i], self.U_t[i + 1])))
+            Z.append(self.g_t(TT.dot(Z[i], self.U_t[i+1]) - self.bias_layer_t[i+1]))
         return Z
 
     def loss_t(self):
