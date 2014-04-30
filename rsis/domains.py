@@ -66,27 +66,29 @@ class CircleWorld(object):
 
 class TorusWorld(object):
 
-    def __init__(self, reward_scal= 10, reward_rad = 0.2, eps_z = 0.05, eps_R = 0., eps_T = 0.02):
+    def __init__(self, reward_scal=10, reward_rad=0.2, eps_z=0.05):
+
         self.reward_rad = reward_rad
         self.reward_scal = reward_scal
-        self.eps_z = eps_z
-        self.R = np.eye(2) + eps_R * rng.randn(2, 2)
-        self.T = eps_T * (np.ones(2) + 0.1 * rng.randn(2))
-        self.g = np.zeros(2)
+        self.eps_z = eps_z # movement noise
+        self.bias = 0.1*np.ones(2)
+        self.g = np.zeros(2) # goal pos
 
     def _reward(self, p):
-        return self.reward_scal if np.linalg.norm(p - self.g) < self.reward_rad else -1 
+        return self.reward_scal if np.linalg.norm(p - self.g) < self.reward_rad else -0.1*self.reward_scal
 
     def reward_func(self, x):
         return np.array([self._reward(x[i]) for i in xrange(x.shape[0])])
 
     def get_samples(self, n, seed = None):
+
         if seed: rng.seed(seed)
+
         z = (rng.randn(2) + 1) % 2 - 1
         states = np.empty((n, 2))
         rewards = np.empty(n)
         for i in xrange(n):
-            z = (self.eps_z * rng.randn(2) + np.dot(self.R, z + self.T) + 1) % 2 - 1
+            z = (z + self.bias + self.eps_z * rng.randn(2) + 1) % 2 - 1
             states[i] = z
             rewards[i] = self._reward(z)
 

@@ -106,6 +106,7 @@ class LSTD_Experiment(object):
                  bias_recon=None,
                  bias_layer=None, # TODO fix naming convention for biases and initial parameters
                  init_scale=1e-4,
+                 tied_weights=True,
     ):
 
         self.p = p
@@ -142,7 +143,8 @@ class LSTD_Experiment(object):
                            Uinit=Uinit,
                            bias_layer=bias_layer,
                            bias_recon=bias_recon,
-                           init_scale=init_scale)
+                           init_scale=init_scale,
+                           tied_weights=tied_weights)
 
         self.output = RL_Output(self.k, self.d, self.fmap, self.model)
         self.d_tot = len(self.model.get_flat_params())

@@ -10,8 +10,8 @@ from rsis.experiments import LSTD_Experiment, PostProcess, tran_funcs
 
 logger = rsis.get_logger(__name__)
 
-
-# plot iteration used (Ubest)
+# plot both last and best features
+# plot iteration used (Ubest);
 # untied weights
 # autoencoder as score matching - what distribution?
 # profile performance
@@ -54,23 +54,24 @@ def batch_experiment(
         n=300,  # dimension of each image
         m=200,  # number of samples per minibatch
         d=100,  # dimension of base feature representation
-        k=(24, 12),  # number of compressed features, U is [dxk]
+        k=(24,16),  # number of compressed features, U is [dxk]
         max_iter=3,  # max number of cg optimizer steps per iteration
         max_h=2000,  # max horizon
         l2_lstd=1e-12,  # reg used for full lstd
         l2_subs=1e-12,  # reg used for subspace lstd
-        reg_loss=('l2', 1e-6),
-        init_scale=1e-2,
+        reg_loss=('l2', 1e-8),
+        init_scale=1e-3,
         gam=1-1e-2,
         world='torus',
         seed=0,
         tran_func='sigmoid',
         optimizer=scipy.optimize.fmin_cg,  # fmin_l_bfgs_b, fmin_bfgs, fmin_ncg, fmin_cg
-        model=rsis.ProjectedRLSTD,
+        model=rsis.StatespaceRLSTD,
         eval_freq=1,
-        samp_dist= 'geom',  # sample distribution for images (geom or unif)
-        patience=50,
-        max_training_steps = 50,
+        samp_dist= 'unif',  # sample distribution for images (geom or unif)
+        patience=100,
+        max_training_steps = 100,
+        tied_weights = False,
 ):
 
     os.system('rm plots/*.png')
@@ -104,6 +105,7 @@ def batch_experiment(
             bias_layer=bias_layer,
             bias_recon=bias_recon,
             init_scale=init_scale,
+            tied_weights=tied_weights,
         )
 
         if output:  # add losses from the previous iterations
@@ -141,13 +143,10 @@ def batch_experiment(
                 logger.info("best loss: %04f" % loss_best)
                 logger.info("current loss: %04f" % loss_new)
 
-                logger.info("current alpha norm: %04f" % numpy.linalg.norm(experiment.model.alpha))
-
-
         except KeyboardInterrupt:
             logger.info('\n user stopped current training loop')
 
-        #experiment.set_model_params(Ubest)
+        experiment.set_model_params(Ubest)
         output = experiment.output  # to pass output onto next layer model
 
     logger.info("pickling results")

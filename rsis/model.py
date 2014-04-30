@@ -332,7 +332,6 @@ class NN_Model(BaseLSTD):
         return numpy.sqrt(numpy.sum((xhat - x[1:]) ** 2)) / len(x)
 
     def encode(self, y):
-        y = y
         for i in xrange(self.n_layers):
             y = self.g(numpy.dot(y, self.U[i]) - self.bias_layer[i])
 
@@ -341,7 +340,7 @@ class NN_Model(BaseLSTD):
     def encode_t(self):
         Z = [self.g_t(TT.dot(self.Y_t, self.U_t[0]) - self.bias_layer_t[0])]
         for i in xrange(self.n_layers - 1):
-            Z.append(self.g_t(TT.dot(Z[i] - self.bias_layer_t[i+1], self.U_t[i + 1])))
+            Z.append(self.g_t(TT.dot(Z[i], self.U_t[i + 1]) - self.bias_layer_t[i+1]))
         return Z
 
 
@@ -354,22 +353,37 @@ class ReconstructiveLSTD(NN_Model):
 
     def __init__(self, *args, **kwargs):
 
+        self.tied_weights = kwargs.pop('tied_weights', True)  # used to determine the horizon h w/ gam
         self.eps = kwargs.pop('eps', 1e-4)  # used to determine the horizon h w/ gam
         max_h = kwargs.pop('max_h', None)
         alpha = kwargs.pop('alpha', None)
+        W = kwargs.pop('alpha', None)
+        init_scale = kwargs.get('init_scale')
+
         self.alpha_t = TT.dvector('alpha')
+        self.W_t = TT.dmatrix('W')
 
         super(ReconstructiveLSTD, self).__init__(*args, **kwargs)
 
-        self.alpha = alpha if alpha is not None else numpy.ones(self.sizes[-1])
+        if self.tied_weights:
+            self.alpha = alpha if alpha is not None else numpy.ones(self.sizes[-1])
+        else:
+            self.W = W if W is not None else init_scale*numpy.random.randn(self.sizes[-1], self.d)
+
         horiz = int(numpy.log(self.eps) / numpy.log(self.gam))  # determine horizon where gam^h < eps
         self.h = min(horiz, max_h) if max_h else horiz
 
     def get_params(self):
-        return self.U + self.bias_layer + [self.bias_recon, self.alpha]
+        if self.tied_weights:
+            return self.U + self.bias_layer + [self.bias_recon, self.alpha]
+        else:
+            return self.U + [self.W] + self.bias_layer + [self.bias_recon]
 
     def get_theano_params(self):
-        return self.U_t + self.bias_layer_t + [self.bias_recon_t, self.alpha_t]
+        if self.tied_weights:
+            return self.U_t + self.bias_layer_t + [self.bias_recon_t, self.alpha_t]
+        else:
+            return self.U_t + [self.W_t] + self.bias_layer_t + [self.bias_recon_t]
 
     def sample_image(self, n, samp_dist='geom', seed=None):
         ''' picks a random time step difference, then randomly subsamples from
@@ -412,14 +426,22 @@ class ReconstructiveLSTD(NN_Model):
         return x, r, y
 
     def decode(self, z):
-        for i in xrange(self.n_layers):
-            z = numpy.dot(z * self.alpha if not i else z, self.U[-(i + 1)].T)
+        if self.tied_weights:
+            for i in xrange(self.n_layers):
+                z = numpy.dot(z * self.alpha if not i else z, self.U[-(i + 1)].T)
+        else:
+            z = numpy.dot(z, self.W)
+
         return z
 
     def decode_t(self):
-        I = TT.dot(self.Z_t[-1] * self.alpha_t, self.U_t[-1].T)
-        for U in self.U_t[:-1][::-1]:
-            I = TT.dot(I, U.T)
+        if self.tied_weights:
+            I = TT.dot(self.Z_t[-1] * self.alpha_t, self.U_t[-1].T)
+            for U in self.U_t[:-1][::-1]:
+                I = TT.dot(I, U.T)
+        else:
+            I = TT.dot(self.Z_t[-1], self.W_t)
+
         return I
 
     def set_params(self, u):
@@ -429,10 +451,16 @@ class ReconstructiveLSTD(NN_Model):
         else:
             out = self._unpack(u)
 
-        self.U = out[0]
+        self.U = out[0] if self.tied_weights else out[0][:-1]
+        if not self.tied_weights:
+            self.W = out[0][-1]
+
         self.bias_layer = out[1][:-1]
         self.bias_recon = out[1][-1]
-        self.alpha = out[2]
+
+        if self.tied_weights:
+            self.alpha = out[2]
+
         self.reset_model_updated()
 
     def _unpack(self, u):
@@ -442,6 +470,10 @@ class ReconstructiveLSTD(NN_Model):
             weights.append(numpy.reshape(u[pt:pt + s[0] * s[1]], s))
             pt += s[0] * s[1]
 
+        if not self.tied_weights:
+            weights.append(numpy.reshape(u[pt:pt + self.sizes[-1] * self.d], (self.sizes[-1], self.d)))
+            pt += self.sizes[-1] * self.d
+
         biases = []
         for i, s in enumerate(self.sizes[1:]):
             biases.append(u[pt:pt + s])
@@ -450,10 +482,14 @@ class ReconstructiveLSTD(NN_Model):
         biases.append(u[pt:pt + self.bias_recon_len])  # append bias_recon
         pt += self.bias_recon_len
 
-        alpha = u[pt:]
-        assert len(alpha) == self.sizes[-1]
+        if self.tied_weights:
+            alpha = u[pt:]
+            assert len(alpha) == self.sizes[-1]
 
-        return weights, biases, alpha
+            return weights, biases, alpha
+
+        else:
+            return weights, biases
 
 
 class StatespaceRLSTD(ReconstructiveLSTD):
