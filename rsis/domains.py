@@ -66,13 +66,13 @@ class CircleWorld(object):
 
 class TorusWorld(object):
 
-    def __init__(self, reward_scal=10, reward_rad=0.2, eps_reward=0, eps_z=0.05):
+    def __init__(self, reward_scal=10, reward_rad=0.2, eps_reward=0, eps_z=0.1, bias_scal=0.2):
 
         self.reward_rad = reward_rad
         self.reward_scal = reward_scal
         self.eps_z = eps_z # movement noise
         self.eps_reward = eps_reward
-        self.bias = 0.1*np.ones(2)
+        self.bias = bias_scal*np.ones(2)
         self.g = np.zeros(2) # goal pos
 
     def _reward(self, p):

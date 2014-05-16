@@ -12,7 +12,8 @@ from numpy.linalg import norm
 import theano
 import theano.tensor as TT
 import theano.sandbox.linalg.ops as LA
-#import rsis.domains.TorusWorld
+from sklearn.decomposition import dict_learning_online, dict_learning, MiniBatchDictionaryLearning
+import cPickle as pickle
 
 def svd_PQ(H, k):
 
@@ -28,13 +29,12 @@ def svd_PQ(H, k):
 
 class SparseHankelDecomposition(object):
 
-    def __init__(self, H, k, lam, const):
+    def __init__(self, H, k, alpha):
 
         self.H = H
         self.d = H.shape[0]
         self.k = k
-        self.lam = lam
-        self.const = const
+        self.alpha = alpha
 
         self.X = np.eye(self.d)[:,:self.k]  # 1e-3*np.random.randn(self.d, self.k)
         self.W = 1e-3*np.random.randn(self.d, self.k)
@@ -45,8 +45,8 @@ class SparseHankelDecomposition(object):
 
         data_loss = TT.sum((TT.dot(self.X_t, self.W_t.T) - self.H_t)**2)
         reg = TT.sum(abs(self.X_t))
-        constraint = TT.sum((LA.diag(TT.dot(self.W_t.T, self.W_t)) - TT.ones(self.k))**2)
-        loss = data_loss + self.lam * reg + self.const * constraint
+        # constraint = TT.sum((LA.diag(TT.dot(self.W_t.T, self.W_t)) - TT.ones(self.k))**2)
+        loss = data_loss + self.alpha * reg
         self._loss_t = theano.function([self.H_t, self.X_t, self.W_t], loss)
 
         grad = theano.grad(loss, [self.X_t, self.W_t])
@@ -56,7 +56,7 @@ class SparseHankelDecomposition(object):
         data_loss = np.sum((np.dot(self.X, self.W.T) - self.H)**2)
         reg = np.sum(abs(self.X))
         constraint = np.sum((np.diag(np.dot(self.W.T, self.W)) - np.ones(self.k))**2)
-        return data_loss, self.lam * reg, self.const * constraint
+        return data_loss, self.alpha * reg, self.const * constraint
 
     def loss_t(self, x):
         X = np.reshape(x[:self.d*self.k], (self.d, self.k))
@@ -72,85 +72,45 @@ class SparseHankelDecomposition(object):
     def flat_params(self):
         return np.concatenate([a.flatten() for a in [self.X, self.W]])
 
-    def optimize(self):
-        x = fmin_l_bfgs_b(self.loss_t,
-                          self.flat_params,
-                          self.grad_t)[0]
-
-        self.X = np.reshape(x[:self.d*self.k], (self.d, self.k))
-        self.W = np.reshape(x[self.d*self.k:], (self.d, self.k))
+    def optimize(self, max_iter=10):
+        print 'doing dictionary learning'
+        # U, V = dict_learning_online(self.H, self.k, self.alpha, verbose=2, method='lars')
+        U, V, _ = dict_learning(self.H, self.k, self.alpha, verbose=2, method='lars', max_iter=max_iter)
+        self.X = U
+        self.W = V.T
 
     def PQ(self):
-        Q = np.linalg.lstsq(self.X.T, np.eye(self.k))[0]
-        P = np.linalg.lstsq(self.H, self.X)[0]
-
+        # H is [h,m]
+        # X is [k,m]
+        # Q is [m,h]
+        # X.T Q = I ; Q,X are [m,k]
+        # P H Q = I ; P H = X.T
+        #P = np.linalg.lstsq(self.H.T, self.X)[0].T
+        #P = np.linalg.lstsq(np.dot(self.H, Q).T, np.eye(self.k))[0].T
+        #Q = np.linalg.lstsq(self.X.T, np.eye(self.k))[0]
+        Q = self.X.T
+        print Q.shape
+        print self.H.shape
+        P = np.linalg.lstsq(np.dot(Q.T, self.H.T), np.eye(self.k))[0].T
         return P, Q
 
+# separate plotting/analysis from learning, save learned data
+# make H rectangular
+# smoothness constraint (wrt the state space)
+# state value function
+# plot different data value function formulations
+# try gaussian blur for scatter plots
+# mapping from S to X
 
-class RICA():
-
-    def __init__(self,k, H, lam):
-
-        self.d = H.shape[0]
-        self.k = k
-        self.H = H
-        self.W = np.random.randn(self.d, self.k)
-        self.lam = lam
-
-
-        self.W_t = TT.dmatrix('W')
-        self.H_t = TT.dmatrix('H')
-
-        loss_t = TT.sum((TT.dot(self.W_t, TT.dot(self.W_t.T, self.H_t)) - self.H_t)**2)
-        reg_t = TT.sum(abs(TT.dot(self.W_t.T, self.H_t)))
-        self._loss_t = theano.function([self.H_t, self.W_t], loss_t + self.lam * reg_t)
-        grad_t = theano.grad(loss_t, self.W_t)
-        self._grad_t = theano.function([self.H_t, self.W_t], grad_t)
-
-    def loss_t(self, w):
-        W = np.reshape(w, (self.d, self.k))
-        return self._loss_t(self.H, W)
-
-    def grad_t(self, w):
-        W = np.reshape(w, (self.d, self.k))
-        return self._grad_t(self.H, W).flatten()
-
-    def loss(self, w):
-        if w.ndim == 1:
-            W = np.reshape(w, (self.d, self.k))
-        else:
-            W = w
-        return np.sum((self.H - np.dot(np.dot(W, W.T), self.H))**2) + self.regularization(W)
-
-    def regularization(self, W):
-        return self.lam * np.sum(abs(np.dot(W.T, self.H)))
-
-    def grad(self, w):
-        if w.ndim == 1:
-            W = np.reshape(w, (self.d, self.k))
-        else:
-            W = w
-        M = np.dot(W, W.T) - np.eye(self.d)
-        return 4*np.dot(np.dot(np.dot(self.H, M), self.H), W).flatten() + self.lam * abs(np.dot(self.H, self.W)).flatten()
-
-    def optimizeW(self):
-        w = fmin_l_bfgs_b(self.loss_t,
-                          self.W.flatten(),
-                          self.grad_t)[0]
-
-        self.W = np.reshape(w, (self.d, self.k))
-
-    def PQ(self):
-        Q = np.linalg.lstsq(np.dot(self.W.T, self.H), np.eye(self.k))[0]
-
-        return self.W, Q
 
 def main(d = 100, # dim of tile features
          n = 5000, # number of total samples
+         h = 2000,
          k = 64,
-         gam = 1-1e-2,
-         lam = 1e4,
-         const = 1e8,
+         pl = 64,
+         gam = 1-1e-1,
+         alpha = 2e0,
+         max_iter = 10,
          seed=None):
     
     world = rsis.TorusWorld()
@@ -159,98 +119,60 @@ def main(d = 100, # dim of tile features
 
     Pos, R = world.get_samples(n+1, seed=seed)
     Pos = Pos[:-1]
-    F = fmap.transform(Pos)
-    
-    h = len(R)//2
+    R = R - np.mean(R)
+    R = R / np.std(R)
+    # S = fmap.transform(Pos)
 
-    H = np.reshape([R[i+j] for i,j in it.product(xrange(h), xrange(h))], (h,h))
-    H_ = np.reshape([R[i+j+1] for i,j in it.product(xrange(h), xrange(h))], (h,h))
+    m = len(R) - h - 1
+    H = np.reshape([R[i+j] for i,j in it.product(xrange(h), xrange(m))], (h,m))
+    H_ = np.reshape([R[i+j+1] for i,j in it.product(xrange(h), xrange(m))], (h,m))
 
-    #P, Q = svd_PQ(H, k)
+    model = SparseHankelDecomposition(H, k, alpha)
+    model.optimize(max_iter) # dictionary learning
+    P, Q = model.PQ()
 
-    def log(model):
-        loss, reg, constraint = model.loss()
-        print 'total loss: ', loss
-        print 'constriant loss: ', constraint
-        print 'regularization: ', reg
-        print 'reg ratio: ', (loss-constraint-reg) / reg
-        print 'constraint ratio: ', (loss-constraint-reg) / constraint
-
-    shd = SparseHankelDecomposition(H,k,lam,const)
-    log(shd)
-    shd.optimize()
-    log(shd)
-
-    P, Q = shd.PQ()
-
-    # rica = RICA(k,H,lam)
-    #
-    # loss = rica.loss(rica.W)
-    # reg = rica.regularization(rica.W)
-    # print 'before: '
-    # print 'total loss: ', loss
-    # print 'regularization: ', reg
-    # print 'ratio: ', (loss-reg) / reg
-
-    # rica.optimizeW()
-    # P, Q = rica.PQ()
-    #
-    # loss = rica.loss(rica.W)
-    # reg = rica.regularization(rica.W)
-    # print 'after:'
-    # print 'total loss: ', loss
-    # print 'regularization: ', reg
-    # print 'ratio after: ', (loss-reg) / reg
-
-
-    print 'P.T H Q - I error: ', np.linalg.norm(np.dot(np.dot(P.T,H),Q) - np.eye(k))
-
-    X = np.dot(H,P)
-
-    Y = np.dot(H,shd.X)
-    print 'HP - X norm: ', np.linalg.norm(X - shd.X)
+    HP = np.dot(H, P)
+    print 'P.T H Q - I error: ', np.linalg.norm(np.dot(np.dot(P.T, H), Q) - np.eye(k))
+    print 'HP - X norm: ', np.linalg.norm(HP - model.X)
+    print 'avg abs value of X', np.mean(abs(model.X))
+    print 'avg abs value of HP', np.mean(abs(HP))
+    print 'sparsity of X', len(np.nonzero(model.X)[0]) / np.prod(model.X.shape, dtype='float')
+    print 'sparsity of HP', len(np.nonzero(HP)[0]) / np.prod(HP.shape, dtype='float')
 
     r0 = H[:,0]
     A = np.dot(np.dot(P.T, H_), Q)
-    b = np.linalg.lstsq(shd.X, r0)[0]
+    # b = np.linalg.lstsq(np.dot(H, P), r0)[0]
+    # b = np.linalg.lstsq(shd.X, r0)[0]
+    b = np.dot(Q.T, r0)
+    v = np.linalg.solve((np.eye(k) - gam * A), b)  # solve for the value function
 
-    # print 'nuclear norm: ', sum(s)
-    # print 'fraction of nuclear norm in first %i singular values: ' % k, sum(s[:k]) / sum(s)
-    #
-    # print 'V column orthogonal error: ', np.linalg.norm(np.eye(k) - np.dot(V.T, V))
-    # print 'U column orthogonal error: ', np.linalg.norm(np.eye(k) - np.dot(U.T,U))
-    #
-    # print '||P.T H Q - I||', np.linalg.norm(np.eye(k) - np.dot(np.dot(P.T,H),Q))
-    # print 'matrix factorization error: ||USV.T-H||', np.linalg.norm(np.dot(U * s, V.T) - H)
-    # print 'norm of H:', np.linalg.norm(H)
-    # print 'fraction of variance captured in SVD: ',
-
-    # solve for the value function
-    v = np.linalg.solve((np.eye(k) - gam * A), b)
-
-    # plt.clf()
-    # plt.bar(range(len(s)), s)
-    # plt.savefig('plots/singularvals.png')
-
-    # H = USV -> (U.T H).T , H V.T
+    out = {'H': H, 'P': P, 'Q': Q, 'X': model.X, 'A': A, 'b': n, 'v': v}
+    with file('out.pickle', 'wb') as pic_file:
+        pickle.dump(out, pic_file)
 
     # test_dynamics(H, R, P, A, b)
 
-    # plot_interpolated_image(Pos[:n/2], np.dot(Q, b), 'plots/reward_interp.png')
     plot_image(Pos[:n/2], np.dot(Q, b), 'plots/reward_scatter.png')
-
-    # plot_interpolated_image(Pos[:n/2], np.dot(Q, v), 'plots/value_interp.png')
     plot_image(Pos[:n/2], np.dot(Q, v), 'plots/value_scatter.png')
 
+
+    for i in xrange(k//pl):
+
+        plot_image(Pos[:n/2], model.X[:,i*pl:(i+1)*pl], 'plots/Xbasis_scatter%i.png' % i)
+        plot_image(Pos[:n/2], Q[:, i*pl:(i+1)*pl], 'plots/Qbasis_scatter%i.png' % i)
+        plot_image(Pos[:n/2], P[:, i*pl:(i+1)*pl], 'plots/Pbasis_scatter%i.png' % i)
+
+    # plot_image(Pos[:n/2], shd.W, 'plots/Wbasis_scatter.png')
+    # plot_image(Pos[:n/2], np.dot(H,P), 'plots/HPbasis_scatter.png')
     #plot_interpolated_image(Pos[:n/2], X, 'plots/basis_interp.png')
-    plot_image(Pos[:n/2], Y, 'plots/Ybasis_scatter.png')
-    plot_image(Pos[:n/2], shd.X, 'plots/Xbasis_scatter.png')
-    plot_image(Pos[:n/2], Q, 'plots/Qbasis_scatter.png')
-    plot_image(Pos[:n/2], P, 'plots/Pbasis_scatter.png')
-    plot_image(Pos[:n/2], shd.W, 'plots/Wbasis_scatter.png')
+
 
     os.system('open plots/*.png')
 
+def plot_singvals(s):
+    plt.clf()
+    plt.bar(range(len(s)), s)
+    plt.savefig('plots/singularvals.png')
 
 def test_dynamics(H, R, P, A, b):
 
@@ -287,7 +209,7 @@ def test_dynamics(H, R, P, A, b):
 
 
 
-def plot_image(P, I, file_name = 'plots/img.png'):
+def plot_image(P, I, file_name = 'plots/img.png', d=50, npad = 2):
 
     plt.clf()
 
@@ -306,8 +228,14 @@ def plot_image(P, I, file_name = 'plots/img.png'):
         ax = plt.subplot(f,f,i+1)
         ax.xaxis.set_visible(False)
         ax.yaxis.set_visible(False)
-        ax.hexbin(P[:,0], P[:,1], C=I[:,i], gridsize=15, cmap='gist_earth')
-        ax.scatter(P[:,0], P[:,1], c=I[:,i], alpha=0.2, linewidths=0, cmap='gist_earth', s=1)
+        ax.hexbin(P[:,0], P[:,1], C=I[:,i], gridsize=12, cmap='gist_earth')
+        #ax.scatter(P[:,0], P[:,1], c=I[:,i], alpha=0.2, linewidths=0, cmap='gist_earth', s=2)
+        #ax.scatter(P[:,0], P[:,1], c=I[:,i], alpha=0.2, linewidths=0, cmap='gist_earth', s=2)
+
+        #xi, yi = np.meshgrid(np.linspace(-1, 1, d), np.linspace(-1, 1, d))
+        #rbf = Rbf(P[:,0], P[:,1], I[:,i], smooth=1e-6, function='gaussian', epsilon=2e-1)
+        #zi = rbf(yi.flatten(), xi.flatten())
+        #ax.imshow(np.reshape(zi, (d, d))[npad:-npad,npad:-npad])
 
     print 'saving'
 
@@ -368,6 +296,65 @@ def plot_interpolated_image(P, I, file_name='plots/img.png', pregrid=False, dim=
         #plt.ylim(-1, 1)
 
     plt.savefig(file_name)
+
+class RICA():
+
+    def __init__(self,k, H, lam):
+
+        self.d = H.shape[0]
+        self.k = k
+        self.H = H
+        self.W = np.random.randn(self.d, self.k)
+        self.lam = lam
+
+
+        self.W_t = TT.dmatrix('W')
+        self.H_t = TT.dmatrix('H')
+
+        loss_t = TT.sum((TT.dot(self.W_t, TT.dot(self.W_t.T, self.H_t)) - self.H_t)**2)
+        reg_t = TT.sum(abs(TT.dot(self.W_t.T, self.H_t)))
+        self._loss_t = theano.function([self.H_t, self.W_t], loss_t + self.lam * reg_t)
+        grad_t = theano.grad(loss_t, self.W_t)
+        self._grad_t = theano.function([self.H_t, self.W_t], grad_t)
+
+    def loss_t(self, w):
+        W = np.reshape(w, (self.d, self.k))
+        return self._loss_t(self.H, W)
+
+    def grad_t(self, w):
+        W = np.reshape(w, (self.d, self.k))
+        return self._grad_t(self.H, W).flatten()
+
+    def loss(self, w):
+        if w.ndim == 1:
+            W = np.reshape(w, (self.d, self.k))
+        else:
+            W = w
+        return np.sum((self.H - np.dot(np.dot(W, W.T), self.H))**2) + self.regularization(W)
+
+    def regularization(self, W):
+        return self.lam * np.sum(abs(np.dot(W.T, self.H)))
+
+    def grad(self, w):
+        if w.ndim == 1:
+            W = np.reshape(w, (self.d, self.k))
+        else:
+            W = w
+        M = np.dot(W, W.T) - np.eye(self.d)
+        return 4*np.dot(np.dot(np.dot(self.H, M), self.H), W).flatten() + self.lam * abs(np.dot(self.H, self.W)).flatten()
+
+    def optimizeW(self):
+        w = fmin_l_bfgs_b(self.loss_t,
+                          self.W.flatten(),
+                          self.grad_t)[0]
+
+        self.W = np.reshape(w, (self.d, self.k))
+
+    def PQ(self):
+        Q = np.linalg.lstsq(np.dot(self.W.T, self.H), np.eye(self.k))[0]
+
+        return self.W, Q
+
 
 
 if __name__ == "__main__":
